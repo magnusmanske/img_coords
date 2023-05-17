@@ -6,7 +6,7 @@ description = "Rust binary to scan a directory tree for images and collect their
 license = "MIT"
 homepage = "https://github.com/magnusmanske/img_coords"
 repository = "https://github.com/magnusmanske/img_coords"
-keywords = ["cli", "EXIF", "coordinates", "gps", "images", "kml"]
+keywords = ["cli", "EXIF", "coordinates", "gps", "images"]
 categories = ["command-line-utilities"]
 
 [dependencies]
