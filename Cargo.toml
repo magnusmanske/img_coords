@@ -8,11 +8,11 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-glob = "*"
+glob = "0.3"
 regex = "1"
-kamadak-exif = "*"
-latlon = "*"
-lazy_static = "*"
-serde_json = "*"
-serde = "*"
+kamadak-exif = "0.5"
+latlon = "0.1"
+lazy_static = "1"
+serde_json = "1"
+serde = "1"
 clap = { version = "4", features = ["derive"]}
