@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust binary to scan a directory tree for images and collect their coordinates from EXIF"
 license = "MIT"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+homepage = "https://github.com/magnusmanske/img_coords"
+repository = "https://github.com/magnusmanske/img_coords"
+keywords = ["cli", "EXIF", "coordinates", "gps", "images", "kml"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 glob = "0.3"
