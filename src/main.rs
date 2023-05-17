@@ -32,7 +32,7 @@ fn scan_tree(root: &str) -> Vec<FileLocation> {
 #[command(arg_required_else_help = true)]
 #[command(name = "ImageCoordinates")]
 #[command(author = "Magnus Manske <magnusmanske@gmail.com>")]
-#[command(version = "0.1.1")]
+#[command(version = "0.1.2")]
 #[command(about = "Scans a directory tree for image files with EXIF coordinates and returns a data file", long_about = None)]
 struct Cli {
 
@@ -52,7 +52,7 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         dir: Option<PathBuf>,
 
-        /// Specifies the output format [KML, JSON (default)]
+        /// Specifies the output format [KML, GEOJSON, JSON (default)]
         #[arg(short, long)]
         format: Option<String>,
     },
@@ -76,6 +76,13 @@ fn main() {
                         println!("{}",fl.as_kml());
                     }
                     println!(r#"</kml>"#);
+                }
+                "geojson" => {
+                    println!("{}",r#"{"type": "FeatureCollection","features": ["#);
+                    for fl in file_locations {
+                        println!("{}",fl.as_geojson());
+                    }
+                    println!("{}",r#"]}"#);
                 }
                 other => eprintln!("Unknown format '{other}'"),
             }

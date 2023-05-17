@@ -1,5 +1,6 @@
 use exif::{Exif, Tag, In, Value};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
@@ -26,6 +27,19 @@ impl FileLocation {
             self.latitude,
             self.altitude.unwrap_or(0.0),
         )
+    }
+
+    pub fn as_geojson(&self) -> String {
+        json!({
+            "type": "Feature",
+           "geometry": {
+               "type": "Point",
+               "coordinates": [self.longitude, self.latitude]
+           },
+           "properties": {
+               "name": self.file.to_owned()
+           }
+        }).to_string()
     }
 
     fn name_xml_escaped(&self) -> String {

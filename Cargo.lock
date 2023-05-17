@@ -187,7 +187,7 @@ checksum = "fed44880c466736ef9a5c5b5facefb5ed0785676d0c02d612db14e54f0d84286"
 
 [[package]]
 name = "img_coords"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "glob",

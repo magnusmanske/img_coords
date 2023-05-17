@@ -1,6 +1,6 @@
 # ImageCoordinates
 This executable can scan a directory tree on your disk, find all images with EXIF data containing coordinates, and collect them into a single file.
-Output can be either JSON (default) or KML. JSON also contains the camera direction, if available in EXIF.
+Output can be either JSON (default), [GeoJSON](https://geojson.org/), or KML. JSON also contains the camera direction, if available in EXIF.
 
 # Installation
 ```
