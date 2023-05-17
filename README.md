@@ -7,6 +7,7 @@ Output can be either JSON (default) or KML. JSON also contains the camera direct
 cargo install img_coords
 ```
 , _or_ download the binaries for your platform from the release
+
 , _or_ checkout and build the repo manually
 
 ## Uninstall
