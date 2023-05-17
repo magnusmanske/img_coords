@@ -32,7 +32,7 @@ fn scan_tree(root: &str) -> Vec<FileLocation> {
 #[command(arg_required_else_help = true)]
 #[command(name = "ImageCoordinates")]
 #[command(author = "Magnus Manske <magnusmanske@gmail.com>")]
-#[command(version = "0.1.0")]
+#[command(version = "0.1.1")]
 #[command(about = "Scans a directory tree for image files with EXIF coordinates and returns a data file", long_about = None)]
 struct Cli {
 

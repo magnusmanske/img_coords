@@ -22,8 +22,8 @@ impl FileLocation {
     pub fn as_kml(&self) -> String {
         format!("<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point></Placemark>",
             self.name_xml_escaped(),
-            self.latitude,
             self.longitude,
+            self.latitude,
             self.altitude.unwrap_or(0.0),
         )
     }
