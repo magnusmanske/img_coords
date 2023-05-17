@@ -1,0 +1,16 @@
+[package]
+name = "img_coords"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+glob = "*"
+regex = "1"
+kamadak-exif = "*"
+latlon = "*"
+lazy_static = "*"
+serde_json = "*"
+serde = "*"
+clap = { version = "4", features = ["derive"]}
