@@ -1,6 +1,8 @@
 use exif::{Exif, Tag, In, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use geojson::GeoJson;
+use kml::Kml;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
@@ -30,16 +32,62 @@ impl FileLocation {
     }
 
     pub fn as_geojson(&self) -> String {
-        json!({
+        let mut j = json!({
             "type": "Feature",
            "geometry": {
                "type": "Point",
                "coordinates": [self.longitude, self.latitude]
            },
            "properties": {
-               "name": self.file.to_owned()
+               "name": self.file.to_owned(),
            }
-        }).to_string()
+        });
+        if let Some(altitude)=self.altitude {
+            j["properties"]["altitude"] = json!(altitude);
+        }
+        if let Some(direction)=self.direction {
+            j["properties"]["direction"] = json!(direction);
+        }
+        j.to_string()
+    }
+
+    pub fn from_kml_element(element: &Kml) -> Option<Self> {
+        if let Kml::Placemark(pm) = element {
+            if let (Some(name),Some(geometry)) = (&pm.name,&pm.geometry) {
+                if let kml::types::Geometry::Point(point) = geometry {
+                    let ret = Self {
+                        file: name.to_owned(),
+                        latitude: point.coord.y,
+                        longitude: point.coord.x,
+                        altitude: point.coord.z,
+                        direction: None, // Not encoded in KML
+                    };
+                    return Some(ret);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn from_geojson_feature(v: &serde_json::Value) -> Option<Self> {
+        let geojson_str = v.to_string();
+        let geojson = geojson_str.parse::<GeoJson>().ok()?;
+        let feature = match geojson {
+            GeoJson::Feature(feature) => feature,
+            _ => return None,
+        };
+        let point = match feature.geometry?.value {
+            geojson::Value::Point(point) => point,
+            _ => return None,
+        };
+        let properties = feature.properties?;
+        Some(Self{
+            file: properties.get("name")?.as_str()?.to_string(),
+            latitude: *point.get(1)?,
+            longitude: *point.get(0)?,
+            altitude: properties.get("altitude")?.as_f64(),
+            direction: properties.get("direction")?.as_f64(),
+        })
     }
 
     fn name_xml_escaped(&self) -> String {

@@ -1,6 +1,6 @@
 [package]
 name = "img_coords"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Rust binary to scan a directory tree for images and collect their coordinates from EXIF"
 license = "MIT"
@@ -10,7 +10,6 @@ keywords = ["cli", "EXIF", "coordinates", "gps", "images"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-glob = "0.3"
 regex = "1"
 kamadak-exif = "0.5"
 latlon = "0.1"
@@ -18,3 +17,8 @@ lazy_static = "1"
 serde_json = "1"
 serde = "1"
 clap = { version = "4", features = ["derive"]}
+geojson = "0.24"
+kml = "0.8"
+jwalk = "0.8"
+walkdir = "2"
+rayon = "1"

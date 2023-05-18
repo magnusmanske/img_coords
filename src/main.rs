@@ -1,32 +1,10 @@
 use std::path::PathBuf;
-
-use file_location::FileLocation;
-use glob::glob;
-use regex::{Regex, RegexBuilder};
-use lazy_static::lazy_static;
-use serde_json::json;
+use file_set::FileSet;
 use clap::{Parser, Subcommand};
 
 pub mod file_location;
+pub mod file_set;
 
-fn scan_tree(root: &str) -> Vec<FileLocation> {
-    lazy_static! {
-        static ref RE_VALID_FILE_TYPE: Regex = RegexBuilder::new(r"\.(png|gif|tif|tiff|jpg|jpeg)$")
-            .case_insensitive(true)
-            .build()
-            .expect("re_valid_file_type does not compile");
-    }
-
-    let path = format!("{root}/**/?*.*");
-    glob(&path)
-        .expect("glob can't glob path {path}")
-        .filter_map(|f|f.ok())
-        .filter_map(|f|f.canonicalize().ok())
-        .filter_map(|f|f.to_str().map(|f|f.to_string()))
-        .filter(|f|RE_VALID_FILE_TYPE.is_match(f))
-        .filter_map(|f|FileLocation::from_file(&f))
-        .collect()
-}
 
 #[derive(Parser)]
 #[command(arg_required_else_help = true)]
@@ -52,6 +30,21 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         dir: Option<PathBuf>,
 
+        /// A file (GeoJSON, KML) to update, ignoring files already in the file 
+        #[arg(short, long, value_name = "FILE")]
+        update: Option<PathBuf>,
+
+        /// Specifies the output format [KML, GEOJSON]
+        #[arg(short, long)]
+        format: Option<String>,
+    },
+
+    /// imports a list of files from STDIN, eg. `find SOME_DIRECTORY | img_coords`
+    Import {
+        /// A file (GeoJSON, KML) to update, ignoring files already in the file 
+        #[arg(short, long, value_name = "FILE")]
+        update: Option<PathBuf>,
+
         /// Specifies the output format [KML, GEOJSON, JSON (default)]
         #[arg(short, long)]
         format: Option<String>,
@@ -61,32 +54,35 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
-        Some(Commands::Scan{dir,format}) => {
+        Some(Commands::Scan{dir,update, format}) => {
             let root = match dir {
                 Some(dir) => dir.to_str().unwrap(),
                 None => ".",
             };
-            let file_locations = scan_tree(root);
-            match format.to_owned().unwrap_or("json".to_string()).trim().to_lowercase().as_str() {
-                "json" => println!("{}",json!(file_locations).to_string()),
-                "kml" => {
-                    println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-                    println!(r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#);
-                    for fl in file_locations {
-                        println!("{}",fl.as_kml());
-                    }
-                    println!(r#"</kml>"#);
-                }
-                "geojson" => {
-                    println!("{}",r#"{"type": "FeatureCollection","features": ["#);
-                    for fl in file_locations {
-                        println!("{}",fl.as_geojson());
-                    }
-                    println!("{}",r#"]}"#);
-                }
-                other => eprintln!("Unknown format '{other}'"),
-            }
-            
+            let mut fs = match update {
+                Some(filename) => {
+                    let mut fs = FileSet::new();
+                    let s = filename.to_str().expect(&format!("Can't convert file name to str: {filename:?}"));
+                    fs.load_from_file(s).expect(&format!("Failed to parse original data from file {s}"));
+                    fs
+                },
+                None => FileSet::new(),
+            };
+            fs.scan_tree(root);
+            fs.output(&format);
+        },
+        Some(Commands::Import{update, format}) => {
+            let mut fs = match update {
+                Some(filename) => {
+                    let mut fs = FileSet::new();
+                    let s = filename.to_str().expect(&format!("Can't convert file name to str: {filename:?}"));
+                    fs.load_from_file(s).expect(&format!("Failed to parse original data from file {s}"));
+                    fs
+                },
+                None => FileSet::new(),
+            };
+            fs.import_files();
+            fs.output(&format);
         },
         None => {}, // Never gets called
     }
