@@ -10,7 +10,7 @@ pub mod file_set;
 #[command(arg_required_else_help = true)]
 #[command(name = "ImageCoordinates")]
 #[command(author = "Magnus Manske <magnusmanske@gmail.com>")]
-#[command(version = "0.1.2")]
+#[command(version = "0.1.4")]
 #[command(about = "Scans a directory tree for image files with EXIF coordinates and returns a data file", long_about = None)]
 struct Cli {
 
@@ -52,6 +52,7 @@ enum Commands {
 }
 
 fn main() {
+    let generate_thumbnails = true; // TODO parameter
     let cli = Cli::parse();
     match &cli.command {
         Some(Commands::Scan{dir,update, format}) => {
@@ -69,7 +70,7 @@ fn main() {
                 None => FileSet::new(),
             };
             fs.scan_tree(root);
-            fs.output(&format);
+            fs.output(&format, generate_thumbnails);
         },
         Some(Commands::Import{update, format}) => {
             let mut fs = match update {
@@ -82,7 +83,7 @@ fn main() {
                 None => FileSet::new(),
             };
             fs.import_files();
-            fs.output(&format);
+            fs.output(&format, generate_thumbnails);
         },
         None => {}, // Never gets called
     }

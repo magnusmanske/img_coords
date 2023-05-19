@@ -1,3 +1,6 @@
+use std::{fs::File, io::{BufReader, Cursor}};
+use base64::{engine::general_purpose, Engine};
+use thumbnailer::{create_thumbnails, ThumbnailSize};
 use exif::{Exif, Tag, In, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -31,7 +34,7 @@ impl FileLocation {
         )
     }
 
-    pub fn as_geojson(&self) -> String {
+    pub fn as_geojson(&self, generate_thumbnail: bool) -> String {
         let mut j = json!({
             "type": "Feature",
            "geometry": {
@@ -48,7 +51,24 @@ impl FileLocation {
         if let Some(direction)=self.direction {
             j["properties"]["direction"] = json!(direction);
         }
+        if generate_thumbnail {
+            if let Some(base64) = self.get_thumbnail_base64() {
+                j["properties"]["thumbnail"] = json!(base64)
+            }
+        }
         j.to_string()
+    }
+
+    fn get_thumbnail_base64(&self) -> Option<String> {
+        let file = File::open(&self.file).ok()?;
+        let reader = BufReader::new(file);
+        let thumbnail = create_thumbnails(reader, mime::IMAGE_JPEG, [ThumbnailSize::Medium]).ok()?;
+        let thumbnail = thumbnail.get(0)?.to_owned();
+        let mut buf = Cursor::new(Vec::new());
+        thumbnail.write_jpeg(&mut buf,8).ok()?;
+        let vec = buf.into_inner();
+        let encoded: String = general_purpose::STANDARD_NO_PAD.encode(vec);
+        Some(encoded)
     }
 
     pub fn from_kml_element(element: &Kml) -> Option<Self> {

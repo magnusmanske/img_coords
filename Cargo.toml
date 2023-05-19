@@ -1,6 +1,6 @@
 [package]
 name = "img_coords"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Rust binary to scan a directory tree for images and collect their coordinates from EXIF"
 license = "MIT"
@@ -22,3 +22,11 @@ kml = "0.8"
 jwalk = "0.8"
 walkdir = "2"
 rayon = "1"
+thumbnailer = "0.4"
+mime = "0.3"
+base64 = "0.21"
+
+[profile.release]
+#lto = 'thin'
+#panic = 'abort'
+#codegen-units = 1

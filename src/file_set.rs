@@ -95,7 +95,7 @@ impl FileSet {
         self.file_locations.append(&mut new_file_locations);
     }
 
-    pub fn output(&self, format: &Option<String>) {
+    pub fn output(&self, format: &Option<String>, generate_thumbnails: bool) {
         match format.to_owned().unwrap_or("geojson".to_string()).trim().to_lowercase().as_str() {
             "kml" => {
                 println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
@@ -109,7 +109,7 @@ impl FileSet {
                 let mut comma = String::new();
                 println!("{}",r#"{"type": "FeatureCollection","features": ["#);
                 for fl in &self.file_locations {
-                    println!("{comma}{}",fl.as_geojson());
+                    println!("{comma}{}",fl.as_geojson(generate_thumbnails));
                     if comma.is_empty() {
                         comma = ",".into();
                     }
