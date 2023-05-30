@@ -100,9 +100,11 @@ impl FileSet {
             "kml" => {
                 println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
                 println!(r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#);
+                println!(r#"<Document>"#);
                 for fl in &self.file_locations {
                     println!("{}",fl.as_kml());
                 }
+                println!(r#"</Document>"#);
                 println!(r#"</kml>"#);
             }
             "geojson" => {
