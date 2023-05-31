@@ -1,6 +1,6 @@
 [package]
 name = "img_coords"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2021"
 description = "Rust binary to scan a directory tree for images and collect their coordinates from EXIF"
 license = "MIT"
