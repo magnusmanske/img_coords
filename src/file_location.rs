@@ -115,7 +115,7 @@ impl FileLocation {
             geojson::Value::Point(point) => point,
             _ => return None,
         };
-        let properties = feature.properties?;
+        let properties = feature.properties.unwrap_or_else(||serde_json::Map::new());
         let thumbnail = match properties.get("thumbnail") {
             Some(s) => match s.as_str() {
                 Some(s) => Some(s.to_string()),
