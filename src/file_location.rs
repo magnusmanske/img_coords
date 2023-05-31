@@ -14,6 +14,7 @@ pub struct FileLocation {
     pub longitude: f64,
     pub altitude: Option<f64>, // ATTENTION sea level implied, not checked
     pub direction: Option<f64>, // ATTENTION magnetic direction implied, not checked
+    pub thumbnail: Option<String>,
 }
 
 impl FileLocation {
@@ -34,7 +35,7 @@ impl FileLocation {
         )
     }
 
-    pub fn as_geojson(&self, generate_thumbnail: bool) -> String {
+    pub fn as_geojson(&mut self, generate_thumbnail: bool) -> String {
         let mut j = json!({
             "type": "Feature",
            "geometry": {
@@ -53,8 +54,11 @@ impl FileLocation {
         }
         if generate_thumbnail {
             if let Some(base64) = self.get_thumbnail_base64() {
-                j["properties"]["thumbnail"] = json!(base64)
+                self.thumbnail = Some(base64)
             }
+        }
+        if let Some(base64)=&self.thumbnail {
+            j["properties"]["thumbnail"] = json!(base64)
         }
         j.to_string()
     }
@@ -81,6 +85,7 @@ impl FileLocation {
                         longitude: point.coord.x,
                         altitude: point.coord.z,
                         direction: None, // Not encoded in KML
+                        thumbnail: None,
                     };
                     return Some(ret);
                 }
@@ -107,6 +112,7 @@ impl FileLocation {
             longitude: *point.get(0)?,
             altitude: properties.get("altitude")?.as_f64(),
             direction: properties.get("direction")?.as_f64(),
+            thumbnail: properties.get("thumbnail")?.as_str().map(|s|s.to_string()),
         })
     }
 
@@ -128,6 +134,7 @@ impl FileLocation {
             longitude: Self::lon_from_value(&exif.get_field(Tag::GPSLongitude, In::PRIMARY)?.value,lon_ref)?,
             altitude: Self::f64_from_value(&exif.get_field(Tag::GPSAltitude, In::PRIMARY)?.value),
             direction: Self::f64_from_value(&exif.get_field(Tag::GPSImgDirection, In::PRIMARY)?.value),
+            thumbnail: None,
         })
     }
 
