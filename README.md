@@ -1,9 +1,17 @@
 # ImageCoordinates
+
+> ** Command line utility to gather EXIF location data **
+
+[![Crates.io](https://img.shields.io/crates/v/img_coords?style=flat-square)](https://crates.io/crates/img_coords)
+[![Crates.io](https://img.shields.io/crates/d/img_coords?style=flat-square)](https://crates.io/crates/img_coords)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE-MIT)
+
+## About
 This executable can scan a directory tree on your disk, find all images with EXIF data containing coordinates, and collect them into a single file.
 Output can be either [GeoJSON](https://geojson.org/) (default), or KML. JSON also contains the timestamp the image was taken, and the camera direction, if available in EXIF.
 Use `--thumbnails` to add `base64`-encoded thumbnails to the `GeoJSON` output.
 
-# Installation
+## Installation
 ```
 cargo install img_coords
 ```
@@ -11,13 +19,12 @@ cargo install img_coords
 
 , _or_ checkout and build the repo manually
 
-## Uninstall
+### Uninstall
 ```
 cargo uninstall img_coords
 ```
 
-
-# Example
+## Example
 Write a KML file to STDOUT:
 ```
 img_coords scan --dir SOME_ROOT_DIRECTORY --format kml --thumbnails
@@ -30,6 +37,5 @@ Use `find` command (can be faster than the build-in `scan` command in some cases
 ```
 find SOME_ROOT_DIRECTORY | img_coords import --format kml
 ```
-
 
 Run `img_coords` or `img_coords scan` to get help.
