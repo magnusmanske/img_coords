@@ -28,7 +28,11 @@ impl FileLocation {
     }
 
     pub fn as_kml(&self) -> String {
-        format!("<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point></Placemark>",
+        let mut other = String::new();
+        if let Some(timestamp)=&self.timestamp {
+            other += &format!("<TimeStamp><when>{}</when></TimeStamp>",timestamp.replace(' ',"T"));
+        }
+        format!("<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point>{other}</Placemark>",
             self.name_xml_escaped(),
             self.longitude,
             self.latitude,
@@ -112,14 +116,28 @@ impl FileLocation {
             _ => return None,
         };
         let properties = feature.properties?;
+        let thumbnail = match properties.get("thumbnail") {
+            Some(s) => match s.as_str() {
+                Some(s) => Some(s.to_string()),
+                None => None,
+            },
+            None => None,
+        };
+        let timestamp = match properties.get("timestamp") {
+            Some(s) => match s.as_str() {
+                Some(s) => Some(s.to_string()),
+                None => None,
+            },
+            None => None,
+        };
         Some(Self{
             file: properties.get("name")?.as_str()?.to_string(),
             latitude: *point.get(1)?,
             longitude: *point.get(0)?,
             altitude: properties.get("altitude")?.as_f64(),
             direction: properties.get("direction")?.as_f64(),
-            thumbnail: properties.get("thumbnail").map(|s|s.to_string()),
-            timestamp: properties.get("timestamp").map(|s|s.to_string()),
+            thumbnail,
+            timestamp,
         })
     }
 
