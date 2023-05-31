@@ -52,7 +52,7 @@ enum Commands {
 }
 
 fn main() {
-    let generate_thumbnails = true; // TODO parameter
+    let generate_thumbnails = false; // TODO parameter
     let cli = Cli::parse();
     match &cli.command {
         Some(Commands::Scan{dir,update, format}) => {

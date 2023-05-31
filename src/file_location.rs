@@ -15,6 +15,7 @@ pub struct FileLocation {
     pub altitude: Option<f64>, // ATTENTION sea level implied, not checked
     pub direction: Option<f64>, // ATTENTION magnetic direction implied, not checked
     pub thumbnail: Option<String>,
+    pub timestamp: Option<String>,
 }
 
 impl FileLocation {
@@ -52,6 +53,9 @@ impl FileLocation {
         if let Some(direction)=self.direction {
             j["properties"]["direction"] = json!(direction);
         }
+        if let Some(timestamp)=&self.timestamp {
+            j["properties"]["timestamp"] = json!(timestamp);
+        }
         if generate_thumbnail && self.thumbnail.is_none() {
             self.thumbnail = self.get_thumbnail_base64();
         }
@@ -84,6 +88,7 @@ impl FileLocation {
                         altitude: point.coord.z,
                         direction: None, // Not encoded in KML
                         thumbnail: None,
+                        timestamp: None,
                     };
                     return Some(ret);
                 }
@@ -111,6 +116,7 @@ impl FileLocation {
             altitude: properties.get("altitude")?.as_f64(),
             direction: properties.get("direction")?.as_f64(),
             thumbnail: properties.get("thumbnail")?.as_str().map(|s|s.to_string()),
+            timestamp: properties.get("timestamp")?.as_str().map(|s|s.to_string()),
         })
     }
 
@@ -126,6 +132,7 @@ impl FileLocation {
     fn from_exif(file: &str, exif: &Exif) -> Option<Self> {
         let lat_ref = Self::letter_from_value(&exif.get_field(Tag::GPSLatitudeRef, In::PRIMARY)?.value)?;
         let lon_ref = Self::letter_from_value(&exif.get_field(Tag::GPSLongitudeRef, In::PRIMARY)?.value)?;
+        let timestamp = Self::string_from_value(exif.get_field(Tag::DateTimeOriginal, In::PRIMARY));
         Some(Self {
             file: file.to_string(),
             latitude: Self::lat_from_value(&exif.get_field(Tag::GPSLatitude, In::PRIMARY)?.value,lat_ref)?,
@@ -133,7 +140,21 @@ impl FileLocation {
             altitude: Self::f64_from_value(&exif.get_field(Tag::GPSAltitude, In::PRIMARY)?.value),
             direction: Self::f64_from_value(&exif.get_field(Tag::GPSImgDirection, In::PRIMARY)?.value),
             thumbnail: None,
+            timestamp: timestamp,
         })
+    }
+
+    fn string_from_value(f: Option<&exif::Field>) -> Option<String> {
+        if let Some(f)=f {
+            if let Value::Ascii(vs) = &f.value {
+                if let Some(s)=vs.get(0) {
+                    if let Ok(ts)=std::str::from_utf8(s) {
+                        return Some(ts.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn letter_from_value(v: &Value) -> Option<char> {
