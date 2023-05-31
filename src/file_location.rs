@@ -117,17 +117,11 @@ impl FileLocation {
         };
         let properties = feature.properties.unwrap_or_else(||serde_json::Map::new());
         let thumbnail = match properties.get("thumbnail") {
-            Some(s) => match s.as_str() {
-                Some(s) => Some(s.to_string()),
-                None => None,
-            },
+            Some(s) => s.as_str().map(|s|s.to_string()),
             None => None,
         };
         let timestamp = match properties.get("timestamp") {
-            Some(s) => match s.as_str() {
-                Some(s) => Some(s.to_string()),
-                None => None,
-            },
+            Some(s) => s.as_str().map(|s|s.to_string()),
             None => None,
         };
         Some(Self{
