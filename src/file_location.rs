@@ -52,7 +52,7 @@ impl FileLocation {
         if let Some(direction)=self.direction {
             j["properties"]["direction"] = json!(direction);
         }
-        if generate_thumbnail {
+        if generate_thumbnail && self.thumbnail.is_none() {
             if let Some(base64) = self.get_thumbnail_base64() {
                 self.thumbnail = Some(base64)
             }
