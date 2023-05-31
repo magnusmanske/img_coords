@@ -1,6 +1,6 @@
 # ImageCoordinates
 
-> ** Command line utility to gather EXIF location data **
+> **Command line utility to gather EXIF location data**
 
 [![Crates.io](https://img.shields.io/crates/v/img_coords?style=flat-square)](https://crates.io/crates/img_coords)
 [![Crates.io](https://img.shields.io/crates/d/img_coords?style=flat-square)](https://crates.io/crates/img_coords)
