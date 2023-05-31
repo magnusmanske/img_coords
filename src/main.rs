@@ -37,6 +37,10 @@ enum Commands {
         /// Specifies the output format [KML, GEOJSON]
         #[arg(short, long)]
         format: Option<String>,
+
+        /// Generate thumbnails for GeoJSON
+        #[arg(short, long)]
+        thumbnails: bool,
     },
 
     /// imports a list of files from STDIN, eg. `find SOME_DIRECTORY | img_coords`
@@ -48,14 +52,17 @@ enum Commands {
         /// Specifies the output format [KML, GEOJSON, JSON (default)]
         #[arg(short, long)]
         format: Option<String>,
+
+        /// Generate thumbnails for GeoJSON
+        #[arg(short, long)]
+        thumbnails: bool,
     },
 }
 
 fn main() {
-    let generate_thumbnails = false; // TODO parameter
     let cli = Cli::parse();
     match &cli.command {
-        Some(Commands::Scan{dir,update, format}) => {
+        Some(Commands::Scan{dir,update, format, thumbnails}) => {
             let root = match dir {
                 Some(dir) => dir.to_str().unwrap(),
                 None => ".",
@@ -70,9 +77,12 @@ fn main() {
                 None => FileSet::new(),
             };
             fs.scan_tree(root);
-            fs.output(&format, generate_thumbnails);
+            if *thumbnails {
+                fs.generate_missing_thumbnails();
+            }
+            fs.output(&format);
         },
-        Some(Commands::Import{update, format}) => {
+        Some(Commands::Import{update, format, thumbnails}) => {
             let mut fs = match update {
                 Some(filename) => {
                     let mut fs = FileSet::new();
@@ -83,7 +93,10 @@ fn main() {
                 None => FileSet::new(),
             };
             fs.import_files();
-            fs.output(&format, generate_thumbnails);
+            if *thumbnails {
+                fs.generate_missing_thumbnails();
+            }
+            fs.output(&format);
         },
         None => {}, // Never gets called
     }

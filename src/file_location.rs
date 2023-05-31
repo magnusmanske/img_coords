@@ -36,7 +36,7 @@ impl FileLocation {
         )
     }
 
-    pub fn as_geojson(&mut self, generate_thumbnail: bool) -> String {
+    pub fn as_geojson(&mut self) -> String {
         let mut j = json!({
             "type": "Feature",
            "geometry": {
@@ -56,13 +56,16 @@ impl FileLocation {
         if let Some(timestamp)=&self.timestamp {
             j["properties"]["timestamp"] = json!(timestamp);
         }
-        if generate_thumbnail && self.thumbnail.is_none() {
-            self.thumbnail = self.get_thumbnail_base64();
-        }
         if let Some(base64)=&self.thumbnail {
             j["properties"]["thumbnail"] = json!(base64)
         }
         j.to_string()
+    }
+
+    pub fn generate_missing_thumbnail(&mut self) {
+        if self.thumbnail.is_none() {
+            self.thumbnail = self.get_thumbnail_base64();
+        }
     }
 
     fn get_thumbnail_base64(&self) -> Option<String> {
@@ -115,8 +118,8 @@ impl FileLocation {
             longitude: *point.get(0)?,
             altitude: properties.get("altitude")?.as_f64(),
             direction: properties.get("direction")?.as_f64(),
-            thumbnail: properties.get("thumbnail")?.as_str().map(|s|s.to_string()),
-            timestamp: properties.get("timestamp")?.as_str().map(|s|s.to_string()),
+            thumbnail: properties.get("thumbnail").map(|s|s.to_string()),
+            timestamp: properties.get("timestamp").map(|s|s.to_string()),
         })
     }
 
