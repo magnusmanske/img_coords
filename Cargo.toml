@@ -1,6 +1,6 @@
 [package]
 name = "img_coords"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Rust binary to scan a directory tree for images and collect their coordinates from EXIF"
 license = "MIT"
@@ -16,7 +16,8 @@ latlon = "0.1"
 lazy_static = "1"
 serde_json = "1"
 serde = "1"
-clap = { version = "4", features = ["derive"]}
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
 geojson = "0.24"
 kml = "0.8"
 jwalk = "0.8"
