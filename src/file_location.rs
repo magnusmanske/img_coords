@@ -132,8 +132,8 @@ impl FileLocation {
             file: properties.get("name")?.as_str()?.to_string(),
             latitude: *point.get(1)?,
             longitude: *point.first()?,
-            altitude: properties.get("altitude")?.as_f64(),
-            direction: properties.get("direction")?.as_f64(),
+            altitude: properties.get("altitude").and_then(|v| v.as_f64()),
+            direction: properties.get("direction").and_then(|v| v.as_f64()),
             thumbnail,
             timestamp,
         })
@@ -321,5 +321,117 @@ mod tests {
         let geojson = fl.as_geojson();
         let expected = r#"{"geometry":{"coordinates":[12.345,45.6789],"type":"Point"},"properties":{"altitude":46.79,"direction":11.0,"name":"test_files/sunrise.jpg","thumbnail":"base64","timestamp":"2025:03:06 05:41:42"},"type":"Feature"}"#;
         assert_eq!(geojson, expected);
+    }
+
+    /// `as_geojson` -> `from_geojson_feature` must reproduce every field. This guards
+    /// the update workflow: emit GeoJSON, then re-load it with `--update`.
+    #[test]
+    fn test_geojson_roundtrip_full() {
+        let fl = FileLocation {
+            file: "a/b c.jpg".to_string(),
+            latitude: 45.6789,
+            longitude: 12.345,
+            altitude: Some(46.79),
+            direction: Some(11.0),
+            thumbnail: Some("base64data".to_string()),
+            timestamp: Some("2025:03:06 05:41:42".to_string()),
+        };
+        let v: serde_json::Value = serde_json::from_str(&fl.as_geojson()).unwrap();
+        let back = FileLocation::from_geojson_feature(&v).unwrap();
+        assert_eq!(back.file, fl.file);
+        assert_eq!(back.latitude, fl.latitude);
+        assert_eq!(back.longitude, fl.longitude);
+        assert_eq!(back.altitude, fl.altitude);
+        assert_eq!(back.direction, fl.direction);
+        assert_eq!(back.thumbnail, fl.thumbnail);
+        assert_eq!(back.timestamp, fl.timestamp);
+    }
+
+    /// Same round-trip but for a location with no altitude/direction/thumbnail/timestamp
+    /// (common for images with GPS coords but no other GPS tags). `as_geojson` omits the
+    /// missing keys, so `from_geojson_feature` must tolerate their absence.
+    #[test]
+    fn test_geojson_roundtrip_minimal() {
+        let fl = FileLocation {
+            file: "test_files/sunrise.jpg".to_string(),
+            latitude: 45.6789,
+            longitude: 12.345,
+            altitude: None,
+            direction: None,
+            thumbnail: None,
+            timestamp: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(&fl.as_geojson()).unwrap();
+        let back = FileLocation::from_geojson_feature(&v)
+            .expect("a location without altitude/direction must still round-trip");
+        assert_eq!(back.file, fl.file);
+        assert_eq!(back.latitude, fl.latitude);
+        assert_eq!(back.longitude, fl.longitude);
+        assert_eq!(back.altitude, None);
+        assert_eq!(back.direction, None);
+        assert_eq!(back.thumbnail, None);
+        assert_eq!(back.timestamp, None);
+    }
+
+    #[test]
+    fn test_from_geojson_feature_missing_name() {
+        let v = serde_json::json!({
+            "type": "Feature",
+            "geometry": { "type": "Point", "coordinates": [12.345, 45.6789] },
+            "properties": {}
+        });
+        assert!(FileLocation::from_geojson_feature(&v).is_none());
+    }
+
+    #[test]
+    fn test_from_geojson_feature_non_point() {
+        let v = serde_json::json!({
+            "type": "Feature",
+            "geometry": { "type": "LineString", "coordinates": [[0.0, 0.0], [1.0, 1.0]] },
+            "properties": { "name": "x.jpg" }
+        });
+        assert!(FileLocation::from_geojson_feature(&v).is_none());
+    }
+
+    #[test]
+    fn test_timestamp_parsed() {
+        let mut fl = FileLocation {
+            file: "x.jpg".to_string(),
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude: None,
+            direction: None,
+            thumbnail: None,
+            timestamp: Some("2025:03:06 05:41:42".to_string()),
+        };
+        let parsed = fl.timestamp_parsed().unwrap();
+        assert_eq!(parsed.to_string(), "2025-03-06 05:41:42");
+
+        fl.timestamp = Some("not a date".to_string());
+        assert!(fl.timestamp_parsed().is_none());
+
+        fl.timestamp = None;
+        assert!(fl.timestamp_parsed().is_none());
+    }
+
+    /// The file name goes into KML markup verbatim, so it must be XML-escaped or a name
+    /// containing `<`/`&`/quotes would produce invalid (or injected) KML.
+    #[test]
+    fn test_as_kml_escapes_name() {
+        let fl = FileLocation {
+            file: r#"a & b <tag> "q" 'x'.jpg"#.to_string(),
+            latitude: 1.0,
+            longitude: 2.0,
+            altitude: None,
+            direction: None,
+            thumbnail: None,
+            timestamp: None,
+        };
+        let kml = fl.as_kml();
+        assert!(kml.contains("<name>a &amp; b &lt;tag&gt; &quot;q&quot; &apos;x&apos;.jpg</name>"));
+        // The escaped name must not reintroduce raw markup characters.
+        let name_part = kml.split("<name>").nth(1).unwrap().split("</name>").next().unwrap();
+        assert!(!name_part.contains('<'));
+        assert!(!name_part.contains('>'));
     }
 }

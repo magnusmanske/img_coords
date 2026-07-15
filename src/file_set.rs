@@ -53,19 +53,37 @@ impl FileSet {
 
     fn load_from_kml(&mut self, data: &str) -> Result<()> {
         let kml: Kml = data.parse().context("not valid KML")?;
-        let doc = match kml {
-            Kml::KmlDocument(doc) => doc,
-            _ => bail!("not a KML document"),
-        };
-        self.file_locations = doc
-            .elements
-            .iter()
-            .filter_map(FileLocation::from_kml_element)
-            .collect();
-        if self.file_locations.is_empty() {
+        let mut locations = Vec::new();
+        Self::collect_placemarks(&kml, &mut locations);
+        if locations.is_empty() {
             bail!("no placemarks with coordinates found");
         }
+        self.file_locations = locations;
         Ok(())
+    }
+
+    /// Placemarks in a KML file are typically wrapped in `<Document>`/`<Folder>`
+    /// containers (this is how the crate parses them, and how our own KML output is
+    /// shaped), so walk the tree rather than only inspecting the top-level elements.
+    fn collect_placemarks(element: &Kml, out: &mut Vec<FileLocation>) {
+        match element {
+            Kml::KmlDocument(doc) => {
+                for e in &doc.elements {
+                    Self::collect_placemarks(e, out);
+                }
+            }
+            Kml::Document { elements, .. } | Kml::Folder { elements, .. } => {
+                for e in elements {
+                    Self::collect_placemarks(e, out);
+                }
+            }
+            Kml::Placemark(_) => {
+                if let Some(fl) = FileLocation::from_kml_element(element) {
+                    out.push(fl);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn load_from_geojson(&mut self, data: &str) -> Result<()> {
@@ -213,14 +231,169 @@ impl FileSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_location::FileLocation;
+    use chrono::NaiveDate;
+
+    fn at_midnight(y: i32, m: u32, d: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+    }
+
+    fn location(file: &str) -> FileLocation {
+        FileLocation {
+            file: file.to_string(),
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude: None,
+            direction: None,
+            thumbnail: None,
+            timestamp: None,
+        }
+    }
 
     #[test]
-    fn test_file_set() {
+    fn test_scan_tree_finds_images() {
         let mut fs = FileSet::default();
         fs.scan_tree("test_files").unwrap();
-        assert!(!fs.file_locations.is_empty());
-        // let mut fs = FileSet::new();
-        // fs.import_files();
-        // assert!(!fs.file_locations.is_empty());
+        assert_eq!(fs.file_locations.len(), 1);
+        assert!(fs.file_locations[0].file.ends_with("sunrise.jpg"));
+    }
+
+    #[test]
+    fn test_scan_tree_nonexistent_dir_errors() {
+        let mut fs = FileSet::default();
+        assert!(fs.scan_tree("/no/such/directory/at/all").is_err());
+    }
+
+    #[test]
+    fn test_scan_tree_file_is_not_a_dir_errors() {
+        let mut fs = FileSet::default();
+        let err = fs.scan_tree("test_files/sunrise.jpg").unwrap_err();
+        assert!(err.to_string().contains("is not a directory"));
+    }
+
+    #[test]
+    fn test_add_files_filters_extension_and_missing() {
+        let mut fs = FileSet::default();
+        fs.add_files(vec![
+            "test_files/sunrise.jpg".to_string(), // valid image, exists
+            "test_files/sunrise.txt".to_string(), // wrong extension -> filtered
+            "test_files/missing.jpg".to_string(), // right extension, does not exist -> dropped
+        ]);
+        assert_eq!(fs.file_locations.len(), 1);
+        assert_eq!(fs.file_locations[0].file, "test_files/sunrise.jpg");
+    }
+
+    #[test]
+    fn test_add_files_dedups_against_existing() {
+        let mut fs = FileSet::default();
+        fs.file_locations.push(location("test_files/sunrise.jpg"));
+        // Same path offered again: must not be read/added a second time.
+        fs.add_files(vec!["test_files/sunrise.jpg".to_string()]);
+        assert_eq!(fs.file_locations.len(), 1);
+    }
+
+    #[test]
+    fn test_before_after_filtering() {
+        // sunrise.jpg has EXIF timestamp 2025:03:06.
+        let scan = |before: Option<NaiveDateTime>, after: Option<NaiveDateTime>| {
+            let mut fs = FileSet {
+                before,
+                after,
+                ..Default::default()
+            };
+            fs.add_files(vec!["test_files/sunrise.jpg".to_string()]);
+            fs.file_locations.len()
+        };
+
+        assert_eq!(scan(None, None), 1, "no bounds keeps the image");
+        assert_eq!(
+            scan(None, Some(at_midnight(2020, 1, 1))),
+            1,
+            "after an earlier date keeps it"
+        );
+        assert_eq!(
+            scan(None, Some(at_midnight(2026, 1, 1))),
+            0,
+            "after a later date drops it"
+        );
+        assert_eq!(
+            scan(Some(at_midnight(2026, 1, 1)), None),
+            1,
+            "before a later date keeps it"
+        );
+        assert_eq!(
+            scan(Some(at_midnight(2020, 1, 1)), None),
+            0,
+            "before an earlier date drops it"
+        );
+    }
+
+    #[test]
+    fn test_load_from_geojson_parses_features() {
+        let data = r#"{"type":"FeatureCollection","features":[
+            {"type":"Feature","geometry":{"type":"Point","coordinates":[12.345,45.6789]},
+             "properties":{"name":"one.jpg","altitude":10.0,"direction":90.0}},
+            {"type":"Feature","geometry":{"type":"Point","coordinates":[1.0,2.0]},
+             "properties":{"name":"two.jpg"}}
+        ]}"#;
+        let mut fs = FileSet::default();
+        fs.load_from_geojson(data).unwrap();
+        assert_eq!(fs.file_locations.len(), 2);
+        assert_eq!(fs.file_locations[0].file, "one.jpg");
+        assert_eq!(fs.file_locations[1].file, "two.jpg");
+    }
+
+    #[test]
+    fn test_load_from_geojson_rejects_non_json() {
+        let mut fs = FileSet::default();
+        assert!(fs.load_from_geojson("not json").is_err());
+    }
+
+    #[test]
+    fn test_load_from_geojson_rejects_missing_features() {
+        let mut fs = FileSet::default();
+        let err = fs
+            .load_from_geojson(r#"{"type":"FeatureCollection"}"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("features"));
+    }
+
+    #[test]
+    fn test_load_from_kml_parses_placemarks() {
+        let data = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+            <Placemark><name>a.jpg</name><Point><coordinates>12.345,45.6789,46.79</coordinates></Point></Placemark>
+            </Document></kml>"#;
+        let mut fs = FileSet::default();
+        fs.load_from_kml(data).unwrap();
+        assert_eq!(fs.file_locations.len(), 1);
+        assert_eq!(fs.file_locations[0].file, "a.jpg");
+        assert_eq!(fs.file_locations[0].altitude, Some(46.79));
+    }
+
+    #[test]
+    fn test_load_from_file_missing_path_errors() {
+        let mut fs = FileSet::default();
+        let err = fs.load_from_file("/no/such/file.json").unwrap_err();
+        assert!(err.to_string().contains("Failed to read"));
+    }
+
+    #[test]
+    fn test_load_from_file_garbage_reports_both_formats() {
+        // A file that is neither GeoJSON nor KML should fail with a message naming both
+        // attempts, rather than a misleading single-format error.
+        let path = std::env::temp_dir().join("img_coords_test_garbage.dat");
+        fs::write(&path, "this is neither geojson nor kml").unwrap();
+        let mut fs = FileSet::default();
+        let err = fs
+            .load_from_file(path.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        let _ = fs::remove_file(&path);
+        assert!(err.contains("GeoJSON"), "message was: {err}");
+        assert!(err.contains("KML"), "message was: {err}");
     }
 }
