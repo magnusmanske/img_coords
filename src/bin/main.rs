@@ -1,7 +1,8 @@
-use chrono::NaiveDate;
+use anyhow::{Context, Result};
+use chrono::{NaiveDate, NaiveDateTime};
 use clap::{Parser, Subcommand};
 use img_coords::file_set::FileSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(arg_required_else_help = true)]
@@ -62,7 +63,7 @@ enum Commands {
     },
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Some(Commands::Scan {
@@ -74,39 +75,22 @@ fn main() {
             after,
         }) => {
             let root = match dir {
-                Some(dir) => dir.to_str().unwrap(),
+                Some(dir) => path_to_str(dir)?,
                 None => ".",
             };
             let mut fs = FileSet::default();
-            if let Some(filename) = update {
-                let s = filename
-                    .to_str()
-                    .expect("Can't convert file name to str: {filename:?}");
-                fs.load_from_file(s)
-                    .expect("Failed to parse original data from file {s}");
-            }
-            const DATE_FORMAT: &str = "%Y-%m-%d";
+            load_update(&mut fs, update)?;
             if let Some(date) = before {
-                fs.set_before(
-                    NaiveDate::parse_from_str(date, DATE_FORMAT)
-                        .expect("Bad date: before")
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap(),
-                );
+                fs.set_before(parse_date(date, "before")?);
             }
             if let Some(date) = after {
-                fs.set_after(
-                    NaiveDate::parse_from_str(date, DATE_FORMAT)
-                        .expect("Bad date: after")
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap(),
-                );
+                fs.set_after(parse_date(date, "after")?);
             }
-            fs.scan_tree(root);
+            fs.scan_tree(root)?;
             if *thumbnails {
                 fs.generate_missing_thumbnails();
             }
-            fs.output(format);
+            fs.output(format)?;
         }
         Some(Commands::Import {
             update,
@@ -114,19 +98,37 @@ fn main() {
             thumbnails,
         }) => {
             let mut fs = FileSet::default();
-            if let Some(filename) = update {
-                let s = filename
-                    .to_str()
-                    .expect("Can't convert file name to str: {filename:?}");
-                fs.load_from_file(s)
-                    .expect("Failed to parse original data from file {s}");
-            }
+            load_update(&mut fs, update)?;
             fs.import_files();
             if *thumbnails {
                 fs.generate_missing_thumbnails();
             }
-            fs.output(format);
+            fs.output(format)?;
         }
         None => {} // Never gets called
     }
+    Ok(())
+}
+
+/// Loads an existing GeoJSON/KML file into the set so its entries can be updated.
+fn load_update(fs: &mut FileSet, update: &Option<PathBuf>) -> Result<()> {
+    if let Some(filename) = update {
+        let s = path_to_str(filename)?;
+        fs.load_from_file(s)
+            .with_context(|| format!("Failed to load update file '{s}'"))?;
+    }
+    Ok(())
+}
+
+fn parse_date(date: &str, which: &str) -> Result<NaiveDateTime> {
+    const DATE_FORMAT: &str = "%Y-%m-%d";
+    NaiveDate::parse_from_str(date, DATE_FORMAT)
+        .with_context(|| format!("Invalid --{which} date '{date}', expected YYYY-MM-DD"))?
+        .and_hms_opt(0, 0, 0)
+        .with_context(|| format!("Invalid --{which} date '{date}'"))
+}
+
+fn path_to_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .with_context(|| format!("Path is not valid UTF-8: {path:?}"))
 }

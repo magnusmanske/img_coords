@@ -1,4 +1,5 @@
 use crate::file_location::FileLocation;
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::NaiveDateTime;
 use jwalk::rayon::prelude::*;
 use jwalk::WalkDir;
@@ -7,11 +8,7 @@ use regex::{Regex, RegexBuilder};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::sync::LazyLock;
-use std::{
-    collections::HashSet,
-    error::Error,
-    fs::{self},
-};
+use std::{collections::HashSet, fs};
 
 static RE_VALID_FILE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
     RegexBuilder::new(r"\.(png|gif|tif|tiff|jpg|jpeg)$")
@@ -36,22 +33,29 @@ impl FileSet {
         self.after = Some(date);
     }
 
-    pub fn load_from_file(&mut self, path: &str) -> Result<(), Box<dyn Error>> {
-        if let Ok(res) = self.load_from_geojson(path) {
-            return Ok(res);
-        }
-        if let Ok(res) = self.load_from_kml(path) {
-            return Ok(res);
-        }
-        Err(format!("Could not find valid format of file {path}").into())
+    pub fn load_from_file(&mut self, path: &str) -> Result<()> {
+        let data =
+            fs::read_to_string(path).with_context(|| format!("Failed to read file '{path}'"))?;
+        // The file format isn't declared, so try each parser in turn. Keep the reason
+        // each one rejected the data so we can report something actionable if none fit.
+        let geojson_err = match self.load_from_geojson(&data) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let kml_err = match self.load_from_kml(&data) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        Err(anyhow!(
+            "Could not parse '{path}' as GeoJSON ({geojson_err:#}) or KML ({kml_err:#})"
+        ))
     }
 
-    fn load_from_kml(&mut self, path: &str) -> Result<(), Box<dyn Error>> {
-        let kml_str: String = fs::read_to_string(path)?.parse()?;
-        let kml: Kml = kml_str.parse().unwrap();
+    fn load_from_kml(&mut self, data: &str) -> Result<()> {
+        let kml: Kml = data.parse().context("not valid KML")?;
         let doc = match kml {
             Kml::KmlDocument(doc) => doc,
-            _ => return Err("Not a KML document".into()),
+            _ => bail!("not a KML document"),
         };
         self.file_locations = doc
             .elements
@@ -59,15 +63,18 @@ impl FileSet {
             .filter_map(FileLocation::from_kml_element)
             .collect();
         if self.file_locations.is_empty() {
-            return Err("No results from KML".into());
+            bail!("no placemarks with coordinates found");
         }
         Ok(())
     }
 
-    fn load_from_geojson(&mut self, path: &str) -> Result<(), Box<dyn Error>> {
-        let data = fs::read_to_string(path)?;
-        let res: serde_json::Value = serde_json::from_str(&data)?;
-        let features = res.get("features").unwrap().as_array().unwrap();
+    fn load_from_geojson(&mut self, data: &str) -> Result<()> {
+        let res: serde_json::Value = serde_json::from_str(data).context("not valid JSON")?;
+        let features = res
+            .get("features")
+            .context("missing 'features' field")?
+            .as_array()
+            .context("'features' is not an array")?;
         self.file_locations = features
             .par_iter()
             .filter_map(FileLocation::from_geojson_feature)
@@ -75,7 +82,15 @@ impl FileSet {
         Ok(())
     }
 
-    pub fn scan_tree(&mut self, root: &str) {
+    pub fn scan_tree(&mut self, root: &str) -> Result<()> {
+        // jwalk defers access errors to iteration (where they'd be silently dropped by
+        // `f.ok()`), so check the root up front to give a clear message for a bad path.
+        let meta =
+            fs::metadata(root).with_context(|| format!("Cannot access directory '{root}'"))?;
+        if !meta.is_dir() {
+            bail!("'{root}' is not a directory");
+        }
+
         // The directory walk itself is parallelized internally by jwalk. We collect
         // the raw paths first, then fan out the expensive per-file work (extension
         // filtering + `canonicalize` syscall) across the rayon thread pool. Filtering
@@ -83,7 +98,7 @@ impl FileSet {
         let paths: Vec<std::path::PathBuf> = WalkDir::new(root)
             // .follow_links(true)
             .try_into_iter()
-            .expect("Directory walker failed")
+            .with_context(|| format!("Failed to scan directory tree at '{root}'"))?
             .filter_map(|f| f.ok())
             .map(|f| f.path())
             .collect();
@@ -95,6 +110,7 @@ impl FileSet {
             .filter_map(|p| p.to_str().map(|p| p.to_string()))
             .collect();
         self.add_files(file_candidates);
+        Ok(())
     }
 
     fn has_valid_extension(path: &Path) -> bool {
@@ -145,7 +161,7 @@ impl FileSet {
             .for_each(|fl| fl.generate_missing_thumbnail());
     }
 
-    pub fn output(&mut self, format: &Option<String>) {
+    pub fn output(&mut self, format: &Option<String>) -> Result<()> {
         // Lock stdout once and wrap it in a BufWriter: a `println!` per feature would
         // otherwise re-acquire the lock and flush on every line. The per-feature
         // serialization is built in parallel first, since it dominates for large sets.
@@ -161,14 +177,14 @@ impl FileSet {
             "kml" => {
                 let bodies: Vec<String> =
                     self.file_locations.par_iter().map(|fl| fl.as_kml()).collect();
-                let _ = writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-                let _ = writeln!(out, r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#);
-                let _ = writeln!(out, r#"<Document>"#);
+                writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
+                writeln!(out, r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#)?;
+                writeln!(out, r#"<Document>"#)?;
                 for body in &bodies {
-                    let _ = writeln!(out, "{body}");
+                    writeln!(out, "{body}")?;
                 }
-                let _ = writeln!(out, r#"</Document>"#);
-                let _ = writeln!(out, r#"</kml>"#);
+                writeln!(out, r#"</Document>"#)?;
+                writeln!(out, r#"</kml>"#)?;
             }
             "geojson" => {
                 let features: Vec<String> = self
@@ -176,16 +192,18 @@ impl FileSet {
                     .par_iter()
                     .map(|fl| fl.as_geojson())
                     .collect();
-                let _ = writeln!(out, r#"{{"type": "FeatureCollection","features": ["#);
+                writeln!(out, r#"{{"type": "FeatureCollection","features": ["#)?;
                 let mut comma = "";
                 for feature in &features {
-                    let _ = writeln!(out, "{comma}{feature}");
+                    writeln!(out, "{comma}{feature}")?;
                     comma = ",";
                 }
-                let _ = writeln!(out, r#"]}}"#);
+                writeln!(out, r#"]}}"#)?;
             }
-            other => eprintln!("Unknown format '{other}'"),
+            other => bail!("Unknown output format '{other}' (expected 'geojson' or 'kml')"),
         }
+        out.flush().context("Failed to write output")?;
+        Ok(())
     }
 }
 
