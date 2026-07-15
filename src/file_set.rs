@@ -1,8 +1,8 @@
 use crate::file_location::FileLocation;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDateTime;
-use jwalk::rayon::prelude::*;
 use jwalk::WalkDir;
+use jwalk::rayon::prelude::*;
 use kml::Kml;
 use regex::{Regex, RegexBuilder};
 use std::io::{self, BufRead, Write};
@@ -175,8 +175,11 @@ impl FileSet {
             .as_str()
         {
             "kml" => {
-                let bodies: Vec<String> =
-                    self.file_locations.par_iter().map(|fl| fl.as_kml()).collect();
+                let bodies: Vec<String> = self
+                    .file_locations
+                    .par_iter()
+                    .map(|fl| fl.as_kml())
+                    .collect();
                 writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
                 writeln!(out, r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#)?;
                 writeln!(out, r#"<Document>"#)?;
