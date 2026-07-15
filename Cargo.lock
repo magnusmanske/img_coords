@@ -693,7 +693,6 @@ dependencies = [
  "kamadak-exif",
  "kml",
  "latlon",
- "lazy_static",
  "mime",
  "rayon",
  "regex",

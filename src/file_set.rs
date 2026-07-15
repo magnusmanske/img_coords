@@ -3,14 +3,22 @@ use chrono::NaiveDateTime;
 use jwalk::rayon::prelude::*;
 use jwalk::WalkDir;
 use kml::Kml;
-use lazy_static::lazy_static;
 use regex::{Regex, RegexBuilder};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::sync::LazyLock;
 use std::{
     collections::HashSet,
     error::Error,
     fs::{self},
 };
+
+static RE_VALID_FILE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
+    RegexBuilder::new(r"\.(png|gif|tif|tiff|jpg|jpeg)$")
+        .case_insensitive(true)
+        .build()
+        .expect("re_valid_file_type does not compile")
+});
 
 #[derive(Clone, Debug, Default)]
 pub struct FileSet {
@@ -61,25 +69,37 @@ impl FileSet {
         let res: serde_json::Value = serde_json::from_str(&data)?;
         let features = res.get("features").unwrap().as_array().unwrap();
         self.file_locations = features
-            .iter()
+            .par_iter()
             .filter_map(FileLocation::from_geojson_feature)
             .collect();
         Ok(())
     }
 
     pub fn scan_tree(&mut self, root: &str) {
-        let iterator = WalkDir::new(root)
+        // The directory walk itself is parallelized internally by jwalk. We collect
+        // the raw paths first, then fan out the expensive per-file work (extension
+        // filtering + `canonicalize` syscall) across the rayon thread pool. Filtering
+        // by extension *before* canonicalizing avoids a syscall for every non-image.
+        let paths: Vec<std::path::PathBuf> = WalkDir::new(root)
             // .follow_links(true)
             .try_into_iter()
-            .expect("Directory walker failed");
-
-        let file_candidates = iterator
+            .expect("Directory walker failed")
             .filter_map(|f| f.ok())
             .map(|f| f.path())
-            .filter_map(|f| f.canonicalize().ok())
-            .filter_map(|f| f.to_str().map(|f| f.to_string()))
+            .collect();
+
+        let file_candidates = paths
+            .into_par_iter()
+            .filter(|p| Self::has_valid_extension(p))
+            .filter_map(|p| p.canonicalize().ok())
+            .filter_map(|p| p.to_str().map(|p| p.to_string()))
             .collect();
         self.add_files(file_candidates);
+    }
+
+    fn has_valid_extension(path: &Path) -> bool {
+        path.to_str()
+            .is_some_and(|s| RE_VALID_FILE_TYPE.is_match(s))
     }
 
     pub fn import_files(&mut self) {
@@ -92,13 +112,6 @@ impl FileSet {
     }
 
     fn add_files(&mut self, file_candidates: Vec<String>) {
-        lazy_static! {
-            static ref RE_VALID_FILE_TYPE: Regex =
-                RegexBuilder::new(r"\.(png|gif|tif|tiff|jpg|jpeg)$")
-                    .case_insensitive(true)
-                    .build()
-                    .expect("re_valid_file_type does not compile");
-        }
         let existing: HashSet<String> = self
             .file_locations
             .par_iter()
@@ -126,12 +139,18 @@ impl FileSet {
     }
 
     pub fn generate_missing_thumbnails(&mut self) {
-        for fl in &mut self.file_locations {
-            fl.generate_missing_thumbnail();
-        }
+        // Thumbnailing is CPU-bound (decode + re-encode per image); fan it out.
+        self.file_locations
+            .par_iter_mut()
+            .for_each(|fl| fl.generate_missing_thumbnail());
     }
 
     pub fn output(&mut self, format: &Option<String>) {
+        // Lock stdout once and wrap it in a BufWriter: a `println!` per feature would
+        // otherwise re-acquire the lock and flush on every line. The per-feature
+        // serialization is built in parallel first, since it dominates for large sets.
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
         match format
             .to_owned()
             .unwrap_or("geojson".to_string())
@@ -140,25 +159,30 @@ impl FileSet {
             .as_str()
         {
             "kml" => {
-                println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-                println!(r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#);
-                println!(r#"<Document>"#);
-                for fl in &self.file_locations {
-                    println!("{}", fl.as_kml());
+                let bodies: Vec<String> =
+                    self.file_locations.par_iter().map(|fl| fl.as_kml()).collect();
+                let _ = writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+                let _ = writeln!(out, r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#);
+                let _ = writeln!(out, r#"<Document>"#);
+                for body in &bodies {
+                    let _ = writeln!(out, "{body}");
                 }
-                println!(r#"</Document>"#);
-                println!(r#"</kml>"#);
+                let _ = writeln!(out, r#"</Document>"#);
+                let _ = writeln!(out, r#"</kml>"#);
             }
             "geojson" => {
-                let mut comma = String::new();
-                println!("{}", r#"{"type": "FeatureCollection","features": ["#);
-                for fl in &mut self.file_locations {
-                    println!("{comma}{}", fl.as_geojson());
-                    if comma.is_empty() {
-                        comma = ",".into();
-                    }
+                let features: Vec<String> = self
+                    .file_locations
+                    .par_iter()
+                    .map(|fl| fl.as_geojson())
+                    .collect();
+                let _ = writeln!(out, r#"{{"type": "FeatureCollection","features": ["#);
+                let mut comma = "";
+                for feature in &features {
+                    let _ = writeln!(out, "{comma}{feature}");
+                    comma = ",";
                 }
-                println!("{}", r#"]}"#);
+                let _ = writeln!(out, r#"]}}"#);
             }
             other => eprintln!("Unknown format '{other}'"),
         }

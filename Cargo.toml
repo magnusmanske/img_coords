@@ -1,6 +1,6 @@
 [package]
 name = "img_coords"
-version = "0.1.8"
+version = "0.2"
 edition = "2024"
 description = "Rust binary to scan a directory tree for images and collect their coordinates from EXIF"
 license = "MIT"
@@ -13,7 +13,6 @@ categories = ["command-line-utilities"]
 regex = "1"
 kamadak-exif = "0.5"
 latlon = "0.1"
-lazy_static = "1"
 serde_json = "1"
 serde = "1"
 chrono = "0.4"
@@ -28,6 +27,6 @@ mime = "0.3"
 base64 = "0.21"
 
 [profile.release]
-#lto = 'thin'
+lto = 'thin'
+codegen-units = 1
 #panic = 'abort'
-#codegen-units = 1

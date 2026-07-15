@@ -46,7 +46,7 @@ impl FileLocation {
         )
     }
 
-    pub fn as_geojson(&mut self) -> String {
+    pub fn as_geojson(&self) -> String {
         let mut j = json!({
             "type": "Feature",
            "geometry": {
