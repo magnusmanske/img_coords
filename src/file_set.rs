@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_file_set() {
         let mut fs = FileSet::default();
-        fs.scan_tree("test_files");
+        fs.scan_tree("test_files").unwrap();
         assert!(!fs.file_locations.is_empty());
         // let mut fs = FileSet::new();
         // fs.import_files();

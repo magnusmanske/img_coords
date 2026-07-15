@@ -92,20 +92,18 @@ impl FileLocation {
     }
 
     pub fn from_kml_element(element: &Kml) -> Option<Self> {
-        if let Kml::Placemark(pm) = element {
-            if let (Some(name), Some(kml::types::Geometry::Point(point))) = (&pm.name, &pm.geometry)
-            {
-                let ret = Self {
-                    file: name.to_owned(),
-                    latitude: point.coord.y,
-                    longitude: point.coord.x,
-                    altitude: point.coord.z,
-                    direction: None, // Not encoded in KML
-                    thumbnail: None,
-                    timestamp: None,
-                };
-                return Some(ret);
-            }
+        if let Kml::Placemark(pm) = element
+            && let (Some(name), Some(kml::types::Geometry::Point(point))) = (&pm.name, &pm.geometry)
+        {
+            return Some(Self {
+                file: name.to_owned(),
+                latitude: point.coord.y,
+                longitude: point.coord.x,
+                altitude: point.coord.z,
+                direction: None, // Not encoded in KML
+                thumbnail: None,
+                timestamp: None,
+            });
         }
         None
     }
@@ -133,7 +131,7 @@ impl FileLocation {
         Some(Self {
             file: properties.get("name")?.as_str()?.to_string(),
             latitude: *point.get(1)?,
-            longitude: *point.get(0)?,
+            longitude: *point.first()?,
             altitude: properties.get("altitude")?.as_f64(),
             direction: properties.get("direction")?.as_f64(),
             thumbnail,
@@ -182,14 +180,12 @@ impl FileLocation {
     }
 
     fn string_from_value(f: Option<&exif::Field>) -> Option<String> {
-        if let Some(f) = f {
-            if let Value::Ascii(vs) = &f.value {
-                if let Some(s) = vs.first() {
-                    if let Ok(ts) = std::str::from_utf8(s) {
-                        return Some(ts.to_string());
-                    }
-                }
-            }
+        if let Some(f) = f
+            && let Value::Ascii(vs) = &f.value
+            && let Some(s) = vs.first()
+            && let Ok(ts) = std::str::from_utf8(s)
+        {
+            return Some(ts.to_string());
         }
         None
     }
@@ -221,7 +217,7 @@ impl FileLocation {
             Value::Rational(r) => r,
             _ => return None,
         };
-        let d = v.get(0)?.to_f64();
+        let d = v.first()?.to_f64();
         let m = v.get(1)?.to_f64();
         let s = v.get(2)?.to_f64();
         let s = format!("{d}° {m}′ {s}″ {r}");
@@ -313,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_as_geojson() {
-        let mut fl = FileLocation {
+        let fl = FileLocation {
             file: "test_files/sunrise.jpg".to_string(),
             latitude: 45.6789,
             longitude: 12.345,
