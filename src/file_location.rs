@@ -322,23 +322,29 @@ impl FileLocation {
     }
 
     fn lat_from_value(v: &Value, r: char) -> Option<Latitude> {
-        Latitude::new(latlon::parse_lat(Self::coord_string_from_value(v, r)?).ok()?)
+        Latitude::new(Self::coord_from_value(v, r, 'N', 'S')?)
     }
 
     fn lon_from_value(v: &Value, r: char) -> Option<Longitude> {
-        Longitude::new(latlon::parse_lng(Self::coord_string_from_value(v, r)?).ok()?)
+        Longitude::new(Self::coord_from_value(v, r, 'E', 'W')?)
     }
 
-    fn coord_string_from_value(v: &Value, r: char) -> Option<String> {
-        let v = match v {
-            Value::Rational(r) => r,
-            _ => return None,
+    /// Converts EXIF degrees/minutes/seconds plus a hemisphere reference to decimal
+    /// degrees. Returns `None` for malformed values or an unexpected reference.
+    fn coord_from_value(v: &Value, reference: char, positive: char, negative: char) -> Option<f64> {
+        let Value::Rational(parts) = v else {
+            return None;
         };
-        let d = v.first()?.to_f64();
-        let m = v.get(1)?.to_f64();
-        let s = v.get(2)?.to_f64();
-        let s = format!("{d}° {m}′ {s}″ {r}");
-        Some(s)
+        let degrees = parts.first()?.to_f64();
+        let minutes = parts.get(1)?.to_f64();
+        let seconds = parts.get(2)?.to_f64();
+        let mut value = degrees + minutes / 60.0 + seconds / 3600.0;
+        match reference.to_ascii_uppercase() {
+            c if c == positive => {}
+            c if c == negative => value = -value,
+            _ => return None,
+        }
+        value.is_finite().then_some(value)
     }
 }
 
@@ -428,6 +434,19 @@ mod tests {
         assert!((fl.latitude.get() - 45.5).abs() < 1e-9);
         assert!((fl.longitude.get() - 12.0).abs() < 1e-9);
         assert_eq!(fl.timestamp.as_deref(), Some("2025:03:06 05:41:42"));
+    }
+
+    #[test]
+    fn test_south_west_coordinates() {
+        let exif = exif_with_fields(vec![
+            primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"S".to_vec()])),
+            primary(Tag::GPSLongitudeRef, Value::Ascii(vec![b"W".to_vec()])),
+            primary(Tag::GPSLatitude, rationals(&[(45, 1), (30, 1), (0, 1)])),
+            primary(Tag::GPSLongitude, rationals(&[(12, 1), (0, 1), (0, 1)])),
+        ]);
+        let fl = FileLocation::from_exif("x.jpg", &exif).unwrap();
+        assert!((fl.latitude.get() + 45.5).abs() < 1e-9);
+        assert!((fl.longitude.get() + 12.0).abs() < 1e-9);
     }
 
     /// `GPSAltitudeRef == 1` means below sea level, so the altitude must be negated.
