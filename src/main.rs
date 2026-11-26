@@ -69,6 +69,10 @@ enum Commands {
         #[arg(short, long, value_name = "DIR")]
         dir: Vec<PathBuf>,
 
+        /// Follow symbolic links while scanning
+        #[arg(long)]
+        follow_links: bool,
+
         /// Existing GeoJSON/KML files to update; images already in them are skipped
         #[arg(short, long, value_name = "FILE")]
         update: Vec<PathBuf>,
@@ -190,6 +194,7 @@ fn main() -> Result<()> {
     let options = match cli.command {
         Commands::Scan {
             dir,
+            follow_links,
             update,
             output,
             format,
@@ -207,6 +212,7 @@ fn main() -> Result<()> {
             fs.set_quiet(quiet);
             fs.set_verbose(verbose);
             fs.set_refresh(refresh);
+            fs.set_follow_links(follow_links);
             load_update(&mut fs, &update)?;
             if let Some(date) = &before {
                 fs.set_before(parse_date(date, "before")?);

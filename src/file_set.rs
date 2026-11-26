@@ -51,6 +51,7 @@ pub struct FileSet {
     verbose: bool,
     quiet: bool,
     refresh: bool,
+    follow_links: bool,
     stats: Stats,
 }
 
@@ -102,6 +103,10 @@ impl FileSet {
 
     pub fn set_refresh(&mut self, refresh: bool) {
         self.refresh = refresh;
+    }
+
+    pub fn set_follow_links(&mut self, follow_links: bool) {
+        self.follow_links = follow_links;
     }
 
     pub fn stats(&self) -> &Stats {
@@ -257,6 +262,7 @@ impl FileSet {
         // consuming the walk so we only allocate strings for actual image candidates.
         let mut file_candidates = Vec::new();
         let entries = WalkDir::new(&root)
+            .follow_links(self.follow_links)
             .try_into_iter()
             .with_context(|| format!("Failed to scan directory tree at '{}'", root.display()))?;
         for entry in entries {
