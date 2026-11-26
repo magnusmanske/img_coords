@@ -38,6 +38,9 @@ struct GeoJsonFeatures {
     features: Vec<geojson::Feature>,
 }
 
+/// Number of features rendered in parallel before writing them out.
+const OUTPUT_CHUNK: usize = 512;
+
 #[derive(Clone, Debug, Default)]
 pub struct FileSet {
     file_locations: Vec<FileLocation>,
@@ -252,37 +255,58 @@ impl FileSet {
 
     pub fn write_to<W: Write>(&self, mut out: W, format: OutputFormat) -> Result<()> {
         match format {
-            OutputFormat::Kml => {
-                let bodies: Vec<String> = self
-                    .file_locations
-                    .par_iter()
-                    .map(|fl| fl.as_kml())
-                    .collect();
-                writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
-                writeln!(out, r#"<kml xmlns="http://www.opengis.net/kml/2.2">"#)?;
-                writeln!(out, r#"<Document>"#)?;
-                for body in &bodies {
-                    writeln!(out, "{body}")?;
+            OutputFormat::Kml => self.write_chunked(
+                &mut out,
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+                    "<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n",
+                    "<Document>\n",
+                ),
+                "\n",
+                "</Document>\n</kml>\n",
+                |location| Ok(location.as_kml()),
+            ),
+            OutputFormat::GeoJson => self.write_chunked(
+                &mut out,
+                "{\"type\": \"FeatureCollection\",\"features\": [\n",
+                ",\n",
+                "\n]}\n",
+                |location| Ok(location.as_geojson()?),
+            ),
+        }
+    }
+
+    /// Renders features in bounded chunks: each chunk is serialized in parallel, then
+    /// written before the next chunk is built, keeping memory use independent of the
+    /// total number of features.
+    fn write_chunked<W, F>(
+        &self,
+        out: &mut W,
+        header: &str,
+        separator: &str,
+        footer: &str,
+        render: F,
+    ) -> Result<()>
+    where
+        W: Write,
+        F: Fn(&FileLocation) -> Result<String> + Sync,
+    {
+        out.write_all(header.as_bytes())?;
+        let mut first = true;
+        for chunk in self.file_locations.chunks(OUTPUT_CHUNK) {
+            let rendered: Vec<String> = chunk
+                .par_iter()
+                .map(&render)
+                .collect::<Result<Vec<_>, _>>()?;
+            for item in rendered {
+                if !first {
+                    out.write_all(separator.as_bytes())?;
                 }
-                writeln!(out, r#"</Document>"#)?;
-                writeln!(out, r#"</kml>"#)?;
-            }
-            OutputFormat::GeoJson => {
-                let features: Vec<String> = self
-                    .file_locations
-                    .par_iter()
-                    .map(|fl| fl.as_geojson())
-                    .collect::<Result<Vec<_>, _>>()
-                    .context("Failed to serialize GeoJSON")?;
-                writeln!(out, r#"{{"type": "FeatureCollection","features": ["#)?;
-                let mut comma = "";
-                for feature in &features {
-                    writeln!(out, "{comma}{feature}")?;
-                    comma = ",";
-                }
-                writeln!(out, r#"]}}"#)?;
+                first = false;
+                out.write_all(item.as_bytes())?;
             }
         }
+        out.write_all(footer.as_bytes())?;
         out.flush().context("Failed to write output")?;
         Ok(())
     }
