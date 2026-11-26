@@ -10,30 +10,22 @@ use std::path::{Path, PathBuf};
 use std::{collections::HashSet, fs};
 
 /// Output format for the collected locations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OutputFormat {
     #[default]
-    #[value(name = "geojson", alias = "json")]
     GeoJson,
-    #[value(name = "kml")]
     Kml,
-    #[value(name = "csv")]
     Csv,
-    #[value(name = "gpx")]
     Gpx,
-    #[value(name = "html")]
     Html,
 }
 
 /// How output features are ordered.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SortKey {
     #[default]
-    #[value(name = "path")]
     Path,
-    #[value(name = "time")]
     Time,
-    #[value(name = "none")]
     None,
 }
 

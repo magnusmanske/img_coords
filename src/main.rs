@@ -1,8 +1,52 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use img_coords::file_set::{FileSet, OutputFormat, SortKey};
 use std::path::{Path, PathBuf};
+
+/// Command-line wrapper around [`OutputFormat`].
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum FormatArg {
+    #[value(name = "geojson", alias = "json")]
+    GeoJson,
+    Kml,
+    Csv,
+    Gpx,
+    Html,
+}
+
+impl From<FormatArg> for OutputFormat {
+    fn from(value: FormatArg) -> Self {
+        match value {
+            FormatArg::GeoJson => Self::GeoJson,
+            FormatArg::Kml => Self::Kml,
+            FormatArg::Csv => Self::Csv,
+            FormatArg::Gpx => Self::Gpx,
+            FormatArg::Html => Self::Html,
+        }
+    }
+}
+
+/// Command-line wrapper around [`SortKey`].
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SortArg {
+    #[value(name = "path")]
+    Path,
+    #[value(name = "time")]
+    Time,
+    #[value(name = "none")]
+    Preserve,
+}
+
+impl From<SortArg> for SortKey {
+    fn from(value: SortArg) -> Self {
+        match value {
+            SortArg::Path => Self::Path,
+            SortArg::Time => Self::Time,
+            SortArg::Preserve => Self::None,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -34,11 +78,11 @@ enum Commands {
 
         /// Output format (inferred from the output extension, else GeoJSON)
         #[arg(short, long, value_enum)]
-        format: Option<OutputFormat>,
+        format: Option<FormatArg>,
 
         /// Order of the output features
         #[arg(short = 's', long, value_enum, default_value = "path")]
-        sort: SortKey,
+        sort: SortArg,
 
         /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
@@ -67,11 +111,11 @@ enum Commands {
 
         /// Output format (inferred from the output extension, else GeoJSON)
         #[arg(short, long, value_enum)]
-        format: Option<OutputFormat>,
+        format: Option<FormatArg>,
 
         /// Order of the output features
         #[arg(short = 's', long, value_enum, default_value = "path")]
-        sort: SortKey,
+        sort: SortArg,
 
         /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
@@ -121,10 +165,11 @@ fn main() -> Result<()> {
     };
 
     let format = format
+        .map(OutputFormat::from)
         .or_else(|| output.as_deref().and_then(format_from_extension))
         .unwrap_or_default();
 
-    fs.sort(sort);
+    fs.sort(SortKey::from(sort));
 
     if thumbnails {
         if matches!(format, OutputFormat::GeoJson | OutputFormat::Html) {
