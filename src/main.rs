@@ -54,7 +54,7 @@ impl From<SortArg> for SortKey {
     arg_required_else_help = true,
     author = "Magnus Manske <magnusmanske@gmail.com>",
     version,
-    about = "Collect EXIF GPS coordinates from images and export them as GeoJSON or KML"
+    about = "Collect EXIF GPS coordinates from images and export them as GeoJSON, KML, CSV, GPX, or a map"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -85,7 +85,7 @@ enum Commands {
         #[arg(short = 's', long, value_enum, default_value = "path")]
         sort: SortArg,
 
-        /// Add base64 JPEG thumbnails (GeoJSON only)
+        /// Add base64 JPEG thumbnails (GeoJSON/HTML only)
         #[arg(short, long)]
         thumbnails: bool,
 
@@ -104,6 +104,10 @@ enum Commands {
         /// Keep only images within RADIUS_KM of LAT,LON
         #[arg(long, value_name = "LAT,LON,RADIUS_KM")]
         near: Option<String>,
+
+        /// Drop duplicate photos that share timestamp and GPS data
+        #[arg(long)]
+        dedupe_by_exif: bool,
 
         /// Suppress progress and summary output on stderr
         #[arg(short = 'q', long)]
@@ -134,7 +138,7 @@ enum Commands {
         #[arg(short = 's', long, value_enum, default_value = "path")]
         sort: SortArg,
 
-        /// Add base64 JPEG thumbnails (GeoJSON only)
+        /// Add base64 JPEG thumbnails (GeoJSON/HTML only)
         #[arg(short, long)]
         thumbnails: bool,
 
@@ -146,6 +150,10 @@ enum Commands {
         #[arg(long, value_name = "LAT,LON,RADIUS_KM")]
         near: Option<String>,
 
+        /// Drop duplicate photos that share timestamp and GPS data
+        #[arg(long)]
+        dedupe_by_exif: bool,
+
         /// Suppress progress and summary output on stderr
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -156,10 +164,22 @@ enum Commands {
     },
 }
 
+/// Options common to both subcommands, after argument parsing.
+struct RunOptions {
+    format: Option<OutputFormat>,
+    output: Option<PathBuf>,
+    sort: SortKey,
+    thumbnails: bool,
+    bbox: Option<String>,
+    near: Option<String>,
+    dedupe_by_exif: bool,
+    quiet: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut fs = FileSet::default();
-    let (format, thumbnails, sort, output, quiet, bbox, near) = match cli.command {
+    let options = match cli.command {
         Commands::Scan {
             dir,
             update,
@@ -171,6 +191,7 @@ fn main() -> Result<()> {
             after,
             bbox,
             near,
+            dedupe_by_exif,
             quiet,
             verbose,
         } => {
@@ -188,7 +209,16 @@ fn main() -> Result<()> {
                 fs.set_after(parse_date(date, "after")?);
             }
             fs.scan_tree(root)?;
-            (format, thumbnails, sort, output, quiet, bbox, near)
+            RunOptions {
+                format: format.map(OutputFormat::from),
+                output,
+                sort: SortKey::from(sort),
+                thumbnails,
+                bbox,
+                near,
+                dedupe_by_exif,
+                quiet,
+            }
         }
         Commands::Import {
             update,
@@ -198,6 +228,7 @@ fn main() -> Result<()> {
             thumbnails,
             bbox,
             near,
+            dedupe_by_exif,
             quiet,
             verbose,
         } => {
@@ -205,35 +236,46 @@ fn main() -> Result<()> {
             fs.set_verbose(verbose);
             load_update(&mut fs, &update)?;
             fs.import_files();
-            (format, thumbnails, sort, output, quiet, bbox, near)
+            RunOptions {
+                format: format.map(OutputFormat::from),
+                output,
+                sort: SortKey::from(sort),
+                thumbnails,
+                bbox,
+                near,
+                dedupe_by_exif,
+                quiet,
+            }
         }
     };
 
-    if let Some(bbox) = bbox.as_deref().map(parse_bbox).transpose()? {
-        fs.retain(|location| bbox.contains(location.latitude, location.longitude));
-    }
-    if let Some(near) = near.as_deref().map(parse_near).transpose()? {
-        fs.retain(|location| near.contains(location.latitude, location.longitude));
-    }
-
-    let format = format
-        .map(OutputFormat::from)
-        .or_else(|| output.as_deref().and_then(format_from_extension))
+    let format = options
+        .format
+        .or_else(|| options.output.as_deref().and_then(format_from_extension))
         .unwrap_or_default();
 
-    fs.sort(SortKey::from(sort));
+    if let Some(bbox) = options.bbox.as_deref().map(parse_bbox).transpose()? {
+        fs.retain(|location| bbox.contains(location.latitude, location.longitude));
+    }
+    if let Some(near) = options.near.as_deref().map(parse_near).transpose()? {
+        fs.retain(|location| near.contains(location.latitude, location.longitude));
+    }
+    if options.dedupe_by_exif {
+        fs.dedupe_by_exif();
+    }
+    fs.sort(options.sort);
 
-    if thumbnails {
+    if options.thumbnails {
         if matches!(format, OutputFormat::GeoJson | OutputFormat::Html) {
             fs.generate_missing_thumbnails();
         } else {
             eprintln!("Warning: --thumbnails only applies to GeoJSON/HTML output; ignoring it");
         }
     }
-    if !quiet {
+    if !options.quiet {
         eprintln!("{}", fs.stats().summary());
     }
-    write_output(&fs, format, output.as_deref())
+    write_output(&fs, format, options.output.as_deref())
 }
 
 /// Writes the collected locations to `output`, or to STDOUT when no file (or `-`) is given.

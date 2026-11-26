@@ -107,6 +107,27 @@ impl FileSet {
         self.file_locations.retain(predicate);
     }
 
+    /// Drops duplicate photos that share timestamp and GPS data but live under different
+    /// paths (common when backups contain the same image multiple times).
+    pub fn dedupe_by_exif(&mut self) {
+        let before = self.file_locations.len();
+        let mut seen = HashSet::new();
+        self.file_locations.retain(|location| {
+            let Some(timestamp) = &location.timestamp else {
+                return true;
+            };
+            let key = (
+                timestamp.clone(),
+                location.latitude.get().to_bits(),
+                location.longitude.get().to_bits(),
+                location.altitude.map(f64::to_bits),
+                location.direction.map(f64::to_bits),
+            );
+            seen.insert(key)
+        });
+        self.stats.duplicates += before - self.file_locations.len();
+    }
+
     pub fn set_before(&mut self, date: NaiveDate) {
         self.before = Some(date);
     }
@@ -603,6 +624,29 @@ mod tests {
 
         fs.sort(SortKey::None);
         assert_eq!(files(&fs), ["c.jpg", "b.jpg", "a.jpg"]);
+    }
+
+    #[test]
+    fn test_dedupe_by_exif() {
+        let make = |file: &str, timestamp: &str| {
+            let mut location = location(file);
+            location.timestamp = Some(timestamp.to_string());
+            location.latitude = crate::file_location::Latitude::new(45.0).unwrap();
+            location.longitude = crate::file_location::Longitude::new(12.0).unwrap();
+            location
+        };
+        let mut fs = FileSet {
+            file_locations: vec![
+                make("a.jpg", "2025:01:01 00:00:00"),
+                make("b.jpg", "2025:01:01 00:00:00"),
+                make("c.jpg", "2025:01:02 00:00:00"),
+            ],
+            ..Default::default()
+        };
+        fs.dedupe_by_exif();
+        let files: Vec<_> = fs.file_locations.iter().map(|l| l.file.as_str()).collect();
+        assert_eq!(files, ["a.jpg", "c.jpg"]);
+        assert_eq!(fs.stats().duplicates, 1);
     }
 
     #[test]
