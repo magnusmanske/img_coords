@@ -101,6 +101,8 @@ pub struct FileLocation {
     pub direction: Option<f64>, // GPSImgDirection; magnetic vs. true north is not tracked
     pub thumbnail: Option<String>,
     pub timestamp: Option<String>,
+    /// UTC offset of `timestamp`, e.g. `+01:00`, when known.
+    pub utc_offset: Option<String>,
 }
 
 /// Borrowed GeoJSON view of a [`FileLocation`], serialized without an intermediate
@@ -127,6 +129,8 @@ struct GeoJsonProperties<'a> {
     direction: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    utc_offset: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thumbnail: Option<&'a str>,
 }
@@ -165,10 +169,7 @@ impl FileLocation {
 
     pub fn as_kml(&self) -> String {
         let mut other = String::new();
-        if let Some(when) = self
-            .timestamp_parsed()
-            .map(|ts| ts.format("%Y-%m-%dT%H:%M:%S").to_string())
-        {
+        if let Some(when) = self.timestamp_iso() {
             other += &format!("<TimeStamp><when>{when}</when></TimeStamp>");
         }
         format!(
@@ -212,10 +213,7 @@ impl FileLocation {
         if let Some(altitude) = self.altitude {
             body += &format!("<ele>{altitude}</ele>");
         }
-        if let Some(when) = self
-            .timestamp_parsed()
-            .map(|ts| ts.format("%Y-%m-%dT%H:%M:%S").to_string())
-        {
+        if let Some(when) = self.timestamp_iso() {
             body += &format!("<time>{when}</time>");
         }
         body += "</wpt>";
@@ -238,6 +236,7 @@ impl FileLocation {
                 name: &self.file,
                 direction: self.direction,
                 timestamp: self.timestamp.as_deref(),
+                utc_offset: self.utc_offset.as_deref(),
                 thumbnail: self.thumbnail.as_deref(),
             },
         }
@@ -268,6 +267,7 @@ impl FileLocation {
         if let Kml::Placemark(pm) = element
             && let (Some(name), Some(kml::types::Geometry::Point(point))) = (&pm.name, &pm.geometry)
         {
+            let (timestamp, utc_offset) = Self::timestamp_from_kml(&pm.children);
             return Some(Self {
                 file: name.to_owned(),
                 latitude: Latitude::new(point.coord.y)?,
@@ -275,26 +275,35 @@ impl FileLocation {
                 altitude: point.coord.z.filter(|value| value.is_finite()),
                 direction: None, // Not encoded in KML
                 thumbnail: None,
-                timestamp: Self::timestamp_from_kml(&pm.children),
+                timestamp,
+                utc_offset,
             });
         }
         None
     }
 
-    /// Reads back the `<TimeStamp><when>` written by `as_kml`, converting the ISO 8601
-    /// value to the EXIF-style timestamp format used internally.
-    fn timestamp_from_kml(children: &[kml::types::Element]) -> Option<String> {
-        let when = children
+    /// Reads back the `<TimeStamp><when>` written by `as_kml`, returning the EXIF-style
+    /// local timestamp and its UTC offset (if the value carried one).
+    fn timestamp_from_kml(children: &[kml::types::Element]) -> (Option<String>, Option<String>) {
+        let Some(when) = children
             .iter()
-            .find(|e| e.name == "TimeStamp")?
-            .children
-            .iter()
-            .find(|e| e.name == "when")?
-            .content
-            .as_deref()?;
-        chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M:%S")
-            .ok()
-            .map(|dt| dt.format("%Y:%m:%d %H:%M:%S").to_string())
+            .find(|e| e.name == "TimeStamp")
+            .and_then(|e| e.children.iter().find(|e| e.name == "when"))
+            .and_then(|e| e.content.as_deref())
+        else {
+            return (None, None);
+        };
+        if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(when) {
+            let timestamp = datetime
+                .naive_local()
+                .format("%Y:%m:%d %H:%M:%S")
+                .to_string();
+            return (Some(timestamp), Some(datetime.offset().to_string()));
+        }
+        match chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M:%S") {
+            Ok(datetime) => (Some(datetime.format("%Y:%m:%d %H:%M:%S").to_string()), None),
+            Err(_) => (None, None),
+        }
     }
 
     /// Builds a location from a typed GeoJSON feature.
@@ -320,6 +329,9 @@ impl FileLocation {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             timestamp: property("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            utc_offset: property("utc_offset")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
         })
@@ -367,7 +379,7 @@ impl FileLocation {
             .ok_or(SkipReason::InvalidCoordinates)?;
         let longitude = Self::lon_from_value(&lon_field.value, lon_ref)
             .ok_or(SkipReason::InvalidCoordinates)?;
-        let timestamp = Self::string_from_value(exif.get_field(Tag::DateTimeOriginal, In::PRIMARY));
+        let (timestamp, utc_offset) = Self::timestamp_from_exif(exif);
         Ok(Self {
             file: file.to_string(),
             latitude,
@@ -379,6 +391,65 @@ impl FileLocation {
                 .filter(|value| value.is_finite()),
             thumbnail: None,
             timestamp,
+            utc_offset,
+        })
+    }
+
+    /// Returns the local timestamp plus its UTC offset. Falls back to the UTC GPS date and
+    /// time when `DateTimeOriginal` is absent.
+    fn timestamp_from_exif(exif: &Exif) -> (Option<String>, Option<String>) {
+        let timestamp = Self::string_from_value(exif.get_field(Tag::DateTimeOriginal, In::PRIMARY));
+        let offset = Self::string_from_value(exif.get_field(Tag::OffsetTimeOriginal, In::PRIMARY))
+            .map(|offset| offset.trim().to_string())
+            .filter(|offset| Self::valid_utc_offset(offset));
+        if timestamp.is_some() {
+            return (timestamp, offset);
+        }
+        let date = Self::string_from_value(exif.get_field(Tag::GPSDateStamp, In::PRIMARY));
+        let time = exif
+            .get_field(Tag::GPSTimeStamp, In::PRIMARY)
+            .and_then(|field| Self::hms_from_value(&field.value));
+        match (date, time) {
+            (Some(date), Some((hour, minute, second))) => (
+                Some(format!("{date} {hour:02}:{minute:02}:{second:02}")),
+                Some("+00:00".to_string()),
+            ),
+            _ => (None, None),
+        }
+    }
+
+    fn valid_utc_offset(offset: &str) -> bool {
+        let bytes = offset.as_bytes();
+        bytes.len() == 6
+            && matches!(bytes[0], b'+' | b'-')
+            && bytes[3] == b':'
+            && bytes[1..3].iter().all(u8::is_ascii_digit)
+            && bytes[4..6].iter().all(u8::is_ascii_digit)
+    }
+
+    fn hms_from_value(value: &Value) -> Option<(u8, u8, u8)> {
+        let Value::Rational(parts) = value else {
+            return None;
+        };
+        let hour = parts.first()?.to_f64();
+        let minute = parts.get(1)?.to_f64();
+        let second = parts.get(2)?.to_f64();
+        if !(0.0..24.0).contains(&hour)
+            || !(0.0..60.0).contains(&minute)
+            || !(0.0..60.0).contains(&second)
+        {
+            return None;
+        }
+        Some((hour as u8, minute as u8, second as u8))
+    }
+
+    /// ISO 8601 representation of the timestamp, including the UTC offset when known.
+    fn timestamp_iso(&self) -> Option<String> {
+        let timestamp = self.timestamp_parsed()?;
+        let base = timestamp.format("%Y-%m-%dT%H:%M:%S").to_string();
+        Some(match &self.utc_offset {
+            Some(offset) => format!("{base}{offset}"),
+            None => base,
         })
     }
 
@@ -542,6 +613,44 @@ mod tests {
     }
 
     #[test]
+    fn test_offset_time_original() {
+        let exif = exif_with_fields(vec![
+            primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"N".to_vec()])),
+            primary(Tag::GPSLongitudeRef, Value::Ascii(vec![b"E".to_vec()])),
+            primary(Tag::GPSLatitude, rationals(&[(45, 1), (0, 1), (0, 1)])),
+            primary(Tag::GPSLongitude, rationals(&[(12, 1), (0, 1), (0, 1)])),
+            primary(
+                Tag::DateTimeOriginal,
+                Value::Ascii(vec![b"2025:03:06 05:41:42".to_vec()]),
+            ),
+            primary(
+                Tag::OffsetTimeOriginal,
+                Value::Ascii(vec![b"+02:00".to_vec()]),
+            ),
+        ]);
+        let fl = FileLocation::from_exif("x.jpg", &exif).unwrap();
+        assert_eq!(fl.utc_offset.as_deref(), Some("+02:00"));
+    }
+
+    #[test]
+    fn test_gps_timestamp_fallback_is_utc() {
+        let exif = exif_with_fields(vec![
+            primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"N".to_vec()])),
+            primary(Tag::GPSLongitudeRef, Value::Ascii(vec![b"E".to_vec()])),
+            primary(Tag::GPSLatitude, rationals(&[(45, 1), (0, 1), (0, 1)])),
+            primary(Tag::GPSLongitude, rationals(&[(12, 1), (0, 1), (0, 1)])),
+            primary(
+                Tag::GPSDateStamp,
+                Value::Ascii(vec![b"2025:03:06".to_vec()]),
+            ),
+            primary(Tag::GPSTimeStamp, rationals(&[(5, 1), (41, 1), (42, 1)])),
+        ]);
+        let fl = FileLocation::from_exif("x.jpg", &exif).unwrap();
+        assert_eq!(fl.timestamp.as_deref(), Some("2025:03:06 05:41:42"));
+        assert_eq!(fl.utc_offset.as_deref(), Some("+00:00"));
+    }
+
+    #[test]
     fn test_south_west_coordinates() {
         let exif = exif_with_fields(vec![
             primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"S".to_vec()])),
@@ -617,6 +726,7 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: None,
+            utc_offset: None,
         };
         assert_eq!(fl.as_csv(), "\"a,b\"\"c.jpg\",1,2,,,");
     }
@@ -631,6 +741,7 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: None,
         };
         let gpx = fl.as_gpx();
         assert!(gpx.contains(r#"lat="1" lon="2""#), "{gpx}");
@@ -693,6 +804,7 @@ mod tests {
             direction: Some(11.0),
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: None,
         };
         let kml = fl.as_kml();
         assert_eq!(
@@ -711,10 +823,33 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: None,
         };
         let kml = Kml::from_str(&fl.as_kml()).unwrap();
         let back = FileLocation::from_kml_element(&kml).unwrap();
         assert_eq!(back.timestamp, fl.timestamp);
+    }
+
+    #[test]
+    fn test_kml_timestamp_with_offset_roundtrip() {
+        let fl = FileLocation {
+            file: "test_files/sunrise.jpg".to_string(),
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
+            altitude: Some(46.79),
+            direction: None,
+            thumbnail: None,
+            timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: Some("+01:00".to_string()),
+        };
+        let text = fl.as_kml();
+        assert!(
+            text.contains("<when>2025-03-06T05:41:42+01:00</when>"),
+            "{text}"
+        );
+        let back = FileLocation::from_kml_element(&Kml::from_str(&text).unwrap()).unwrap();
+        assert_eq!(back.timestamp, fl.timestamp);
+        assert_eq!(back.utc_offset, fl.utc_offset);
     }
 
     #[test]
@@ -727,6 +862,7 @@ mod tests {
             direction: Some(11.0),
             thumbnail: Some("base64".to_string()),
             timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: None,
         };
         let geojson = fl.as_geojson().unwrap();
         let expected = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[12.345,45.6789,46.79]},"properties":{"name":"test_files/sunrise.jpg","direction":11.0,"timestamp":"2025:03:06 05:41:42","thumbnail":"base64"}}"#;
@@ -745,12 +881,14 @@ mod tests {
             direction: Some(11.0),
             thumbnail: Some("base64data".to_string()),
             timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: Some("+01:00".to_string()),
         };
         let v: serde_json::Value = serde_json::from_str(&fl.as_geojson().unwrap()).unwrap();
         let back = FileLocation::from_geojson_feature(&v).unwrap();
         assert_eq!(back.file, fl.file);
         assert_eq!(back.latitude, fl.latitude);
         assert_eq!(back.longitude, fl.longitude);
+        assert_eq!(back.utc_offset, fl.utc_offset);
         assert_eq!(back.altitude, fl.altitude);
         assert_eq!(back.direction, fl.direction);
         assert_eq!(back.thumbnail, fl.thumbnail);
@@ -770,6 +908,7 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: None,
+            utc_offset: None,
         };
         let v: serde_json::Value = serde_json::from_str(&fl.as_geojson().unwrap()).unwrap();
         let back = FileLocation::from_geojson_feature(&v)
@@ -813,6 +952,7 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
+            utc_offset: None,
         };
         let parsed = fl.timestamp_parsed().unwrap();
         assert_eq!(parsed.to_string(), "2025-03-06 05:41:42");
@@ -836,6 +976,7 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: None,
+            utc_offset: None,
         };
         let kml = fl.as_kml();
         assert!(kml.contains("<name>a &amp; b &lt;tag&gt; &quot;q&quot; &apos;x&apos;.jpg</name>"));

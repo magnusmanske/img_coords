@@ -464,6 +464,7 @@ mod tests {
             direction: None,
             thumbnail: None,
             timestamp: None,
+            utc_offset: None,
         }
     }
 
