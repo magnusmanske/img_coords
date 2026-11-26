@@ -401,12 +401,7 @@ impl FileLocation {
     }
 
     fn name_xml_escaped(&self) -> String {
-        self.file
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&apos;")
+        xml_escape(&self.file)
     }
 
     pub fn timestamp_parsed(&self) -> Option<chrono::NaiveDateTime> {
@@ -574,6 +569,24 @@ impl FileLocation {
         }
         value.is_finite().then_some(value)
     }
+}
+
+/// Escapes text for XML 1.0, replacing characters that are not allowed in XML.
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\t' | '\n' | '\r' => escaped.push(character),
+            c if (c as u32) < 0x20 => escaped.push('\u{FFFD}'),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// Quotes a CSV field if it contains a comma, quote, or line break.
@@ -1086,6 +1099,24 @@ mod tests {
 
     /// The file name goes into KML markup verbatim, so it must be XML-escaped or a name
     /// containing `<`/`&`/quotes would produce invalid (or injected) KML.
+    #[test]
+    fn test_xml_escape_strips_control_characters() {
+        let fl = FileLocation {
+            file: "a\u{1}b&c.jpg".to_string(),
+            latitude: lat(1.0),
+            longitude: lon(2.0),
+            altitude: None,
+            direction: None,
+            direction_ref: None,
+            thumbnail: None,
+            timestamp: None,
+            utc_offset: None,
+        };
+        let kml = fl.as_kml();
+        assert!(kml.contains("<name>a\u{FFFD}b&amp;c.jpg</name>"), "{kml}");
+        assert!(!kml.contains('\u{1}'));
+    }
+
     #[test]
     fn test_as_kml_escapes_name() {
         let fl = FileLocation {
