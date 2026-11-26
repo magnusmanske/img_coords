@@ -280,8 +280,8 @@ mod tests {
     fn location(file: &str) -> FileLocation {
         FileLocation {
             file: file.to_string(),
-            latitude: 0.0,
-            longitude: 0.0,
+            latitude: crate::file_location::Latitude::new(0.0).unwrap(),
+            longitude: crate::file_location::Longitude::new(0.0).unwrap(),
             altitude: None,
             direction: None,
             thumbnail: None,

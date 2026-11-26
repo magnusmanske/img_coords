@@ -2,7 +2,7 @@ use base64::{Engine, engine::general_purpose};
 use exif::{Exif, In, Tag, Value};
 use geojson::Feature;
 use kml::Kml;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
 use std::{
     fs::File,
@@ -10,6 +10,60 @@ use std::{
     path::Path,
 };
 use thumbnailer::{ThumbnailSize, create_thumbnails};
+
+/// A latitude in degrees, guaranteed to be finite and within `[-90, 90]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Latitude(f64);
+
+impl Latitude {
+    pub fn new(value: f64) -> Option<Self> {
+        (-90.0..=90.0).contains(&value).then_some(Self(value))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Serialize for Latitude {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Latitude {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = f64::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| serde::de::Error::custom("latitude out of range"))
+    }
+}
+
+/// A longitude in degrees, guaranteed to be finite and within `[-180, 180]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Longitude(f64);
+
+impl Longitude {
+    pub fn new(value: f64) -> Option<Self> {
+        (-180.0..=180.0).contains(&value).then_some(Self(value))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Serialize for Longitude {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Longitude {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = f64::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| serde::de::Error::custom("longitude out of range"))
+    }
+}
 
 /// MIME type used to decode an image extension we support. Returns `None` for files
 /// that are not one of the image formats we try to process.
@@ -42,8 +96,8 @@ pub fn image_mime(path: &Path) -> Option<mime::Mime> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
     pub file: String,
-    pub latitude: f64,
-    pub longitude: f64,
+    pub latitude: Latitude,
+    pub longitude: Longitude,
     pub altitude: Option<f64>, // negative when below sea level (from GPSAltitudeRef)
     pub direction: Option<f64>, // GPSImgDirection; magnetic vs. true north is not tracked
     pub thumbnail: Option<String>,
@@ -70,8 +124,8 @@ impl FileLocation {
         format!(
             "<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point>{other}</Placemark>",
             self.name_xml_escaped(),
-            self.longitude,
-            self.latitude,
+            self.longitude.get(),
+            self.latitude.get(),
             self.altitude.unwrap_or(0.0),
         )
     }
@@ -79,8 +133,8 @@ impl FileLocation {
     pub fn as_geojson(&self) -> String {
         // Altitude is the optional third coordinate element, per the GeoJSON spec.
         let coordinates = match self.altitude {
-            Some(altitude) => json!([self.longitude, self.latitude, altitude]),
-            None => json!([self.longitude, self.latitude]),
+            Some(altitude) => json!([self.longitude.get(), self.latitude.get(), altitude]),
+            None => json!([self.longitude.get(), self.latitude.get()]),
         };
         let mut j = json!({
             "type": "Feature",
@@ -131,8 +185,8 @@ impl FileLocation {
         {
             return Some(Self {
                 file: name.to_owned(),
-                latitude: point.coord.y,
-                longitude: point.coord.x,
+                latitude: Latitude::new(point.coord.y)?,
+                longitude: Longitude::new(point.coord.x)?,
                 altitude: point.coord.z,
                 direction: None, // Not encoded in KML
                 thumbnail: None,
@@ -168,8 +222,8 @@ impl FileLocation {
         let property = |key: &str| properties.and_then(|p| p.get(key));
         Some(Self {
             file: property("name")?.as_str()?.to_string(),
-            latitude: *point.get(1)?,
-            longitude: *point.first()?,
+            latitude: Latitude::new(*point.get(1)?)?,
+            longitude: Longitude::new(*point.first()?)?,
             // Altitude is the third coordinate per the GeoJSON spec; also accept the
             // legacy `properties.altitude` emitted by older versions of this tool.
             altitude: point
@@ -267,12 +321,12 @@ impl FileLocation {
         }
     }
 
-    fn lat_from_value(v: &Value, r: char) -> Option<f64> {
-        latlon::parse_lat(Self::coord_string_from_value(v, r)?).ok()
+    fn lat_from_value(v: &Value, r: char) -> Option<Latitude> {
+        Latitude::new(latlon::parse_lat(Self::coord_string_from_value(v, r)?).ok()?)
     }
 
-    fn lon_from_value(v: &Value, r: char) -> Option<f64> {
-        latlon::parse_lng(Self::coord_string_from_value(v, r)?).ok()
+    fn lon_from_value(v: &Value, r: char) -> Option<Longitude> {
+        Longitude::new(latlon::parse_lng(Self::coord_string_from_value(v, r)?).ok()?)
     }
 
     fn coord_string_from_value(v: &Value, r: char) -> Option<String> {
@@ -293,13 +347,33 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    fn lat(value: f64) -> Latitude {
+        Latitude::new(value).unwrap()
+    }
+
+    fn lon(value: f64) -> Longitude {
+        Longitude::new(value).unwrap()
+    }
+
+    #[test]
+    fn test_coordinate_ranges() {
+        assert!(Latitude::new(90.0).is_some());
+        assert!(Latitude::new(-90.0).is_some());
+        assert!(Latitude::new(90.1).is_none());
+        assert!(Latitude::new(f64::NAN).is_none());
+        assert!(Longitude::new(180.0).is_some());
+        assert!(Longitude::new(-180.0).is_some());
+        assert!(Longitude::new(180.1).is_none());
+        assert!(Longitude::new(f64::INFINITY).is_none());
+    }
+
     #[test]
     fn test_from_file() {
         let fl = FileLocation::from_file("test_files/sunrise.jpg").unwrap();
         println!("{fl:?}");
         assert_eq!(fl.file, "test_files/sunrise.jpg");
-        assert_eq!(fl.latitude, 45.50566666666667);
-        assert_eq!(fl.longitude, 12.341161111111111);
+        assert_eq!(fl.latitude.get(), 45.50566666666667);
+        assert_eq!(fl.longitude.get(), 12.341161111111111);
         assert_eq!(fl.altitude, Some(46.79));
         assert_eq!(fl.direction, Some(11.0));
         assert_eq!(fl.thumbnail, None);
@@ -351,8 +425,8 @@ mod tests {
             .expect("missing altitude/direction must not drop the image");
         assert_eq!(fl.altitude, None);
         assert_eq!(fl.direction, None);
-        assert!((fl.latitude - 45.5).abs() < 1e-9);
-        assert!((fl.longitude - 12.0).abs() < 1e-9);
+        assert!((fl.latitude.get() - 45.5).abs() < 1e-9);
+        assert!((fl.longitude.get() - 12.0).abs() < 1e-9);
         assert_eq!(fl.timestamp.as_deref(), Some("2025:03:06 05:41:42"));
     }
 
@@ -389,8 +463,8 @@ mod tests {
         });
         let fl = FileLocation::from_geojson_feature(&v).unwrap();
         assert_eq!(fl.file, "test_files/sunrise.jpg");
-        assert_eq!(fl.latitude, 45.6789);
-        assert_eq!(fl.longitude, 12.345);
+        assert_eq!(fl.latitude.get(), 45.6789);
+        assert_eq!(fl.longitude.get(), 12.345);
         assert_eq!(fl.altitude, Some(46.79));
         assert_eq!(fl.direction, Some(11.0));
         assert_eq!(fl.thumbnail, Some("base64".to_string()));
@@ -445,8 +519,8 @@ mod tests {
         .unwrap();
         let fl = FileLocation::from_kml_element(&kml).unwrap();
         assert_eq!(fl.file, "test_files/sunrise.jpg");
-        assert_eq!(fl.latitude, 45.6789);
-        assert_eq!(fl.longitude, 12.345);
+        assert_eq!(fl.latitude.get(), 45.6789);
+        assert_eq!(fl.longitude.get(), 12.345);
         assert_eq!(fl.altitude, Some(46.79));
         assert_eq!(fl.direction, None);
         assert_eq!(fl.thumbnail, None);
@@ -457,8 +531,8 @@ mod tests {
     fn test_as_kml() {
         let fl = FileLocation {
             file: "test_files/sunrise.jpg".to_string(),
-            latitude: 45.6789,
-            longitude: 12.345,
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
             altitude: Some(46.79),
             direction: Some(11.0),
             thumbnail: None,
@@ -475,8 +549,8 @@ mod tests {
     fn test_kml_timestamp_roundtrip() {
         let fl = FileLocation {
             file: "test_files/sunrise.jpg".to_string(),
-            latitude: 45.6789,
-            longitude: 12.345,
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
             altitude: Some(46.79),
             direction: None,
             thumbnail: None,
@@ -491,8 +565,8 @@ mod tests {
     fn test_as_geojson() {
         let fl = FileLocation {
             file: "test_files/sunrise.jpg".to_string(),
-            latitude: 45.6789,
-            longitude: 12.345,
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
             altitude: Some(46.79),
             direction: Some(11.0),
             thumbnail: Some("base64".to_string()),
@@ -509,8 +583,8 @@ mod tests {
     fn test_geojson_roundtrip_full() {
         let fl = FileLocation {
             file: "a/b c.jpg".to_string(),
-            latitude: 45.6789,
-            longitude: 12.345,
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
             altitude: Some(46.79),
             direction: Some(11.0),
             thumbnail: Some("base64data".to_string()),
@@ -534,8 +608,8 @@ mod tests {
     fn test_geojson_roundtrip_minimal() {
         let fl = FileLocation {
             file: "test_files/sunrise.jpg".to_string(),
-            latitude: 45.6789,
-            longitude: 12.345,
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
             altitude: None,
             direction: None,
             thumbnail: None,
@@ -577,8 +651,8 @@ mod tests {
     fn test_timestamp_parsed() {
         let mut fl = FileLocation {
             file: "x.jpg".to_string(),
-            latitude: 0.0,
-            longitude: 0.0,
+            latitude: lat(0.0),
+            longitude: lon(0.0),
             altitude: None,
             direction: None,
             thumbnail: None,
@@ -600,8 +674,8 @@ mod tests {
     fn test_as_kml_escapes_name() {
         let fl = FileLocation {
             file: r#"a & b <tag> "q" 'x'.jpg"#.to_string(),
-            latitude: 1.0,
-            longitude: 2.0,
+            latitude: lat(1.0),
+            longitude: lon(2.0),
             altitude: None,
             direction: None,
             thumbnail: None,
