@@ -172,12 +172,17 @@ impl FileLocation {
         if let Some(when) = self.timestamp_iso() {
             other += &format!("<TimeStamp><when>{when}</when></TimeStamp>");
         }
+        // Omit the altitude component when unknown so viewers clamp the point to the
+        // ground instead of pinning it to sea level.
+        let (altitude_mode, altitude) = match self.altitude {
+            Some(altitude) => ("absolute", format!(",{altitude}")),
+            None => ("clampToGround", String::new()),
+        };
         format!(
-            "<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point>{other}</Placemark>",
+            "<Placemark><name>{}</name><Point><altitudeMode>{altitude_mode}</altitudeMode><coordinates>{},{}{altitude}</coordinates></Point>{other}</Placemark>",
             self.name_xml_escaped(),
             self.longitude.get(),
             self.latitude.get(),
-            self.altitude.unwrap_or(0.0),
         )
     }
 
@@ -809,8 +814,31 @@ mod tests {
         let kml = fl.as_kml();
         assert_eq!(
             kml,
-            "<Placemark><name>test_files/sunrise.jpg</name><Point><coordinates>12.345,45.6789,46.79</coordinates></Point><TimeStamp><when>2025-03-06T05:41:42</when></TimeStamp></Placemark>"
+            "<Placemark><name>test_files/sunrise.jpg</name><Point><altitudeMode>absolute</altitudeMode><coordinates>12.345,45.6789,46.79</coordinates></Point><TimeStamp><when>2025-03-06T05:41:42</when></TimeStamp></Placemark>"
         );
+    }
+
+    #[test]
+    fn test_kml_without_altitude_clamps_to_ground() {
+        let fl = FileLocation {
+            file: "a.jpg".to_string(),
+            latitude: lat(45.6789),
+            longitude: lon(12.345),
+            altitude: None,
+            direction: None,
+            thumbnail: None,
+            timestamp: None,
+            utc_offset: None,
+        };
+        let kml = fl.as_kml();
+        assert!(
+            kml.contains(
+                "<altitudeMode>clampToGround</altitudeMode><coordinates>12.345,45.6789</coordinates>"
+            ),
+            "{kml}"
+        );
+        let back = FileLocation::from_kml_element(&Kml::from_str(&kml).unwrap()).unwrap();
+        assert_eq!(back.altitude, None);
     }
 
     #[test]
