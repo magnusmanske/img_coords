@@ -81,6 +81,7 @@ jobs:
           target: ${{ matrix.target }}
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
           checksum: sha256
+          locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish-crate:
