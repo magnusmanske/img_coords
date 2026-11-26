@@ -21,6 +21,8 @@ pub enum OutputFormat {
     Csv,
     #[value(name = "gpx")]
     Gpx,
+    #[value(name = "html")]
+    Html,
 }
 
 /// How output features are ordered.
@@ -294,6 +296,39 @@ impl FileSet {
                 "\n",
                 "</gpx>\n",
                 |location| Ok(location.as_gpx()),
+            ),
+            OutputFormat::Html => self.write_chunked(
+                &mut out,
+                concat!(
+                    "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">",
+                    "<title>img_coords</title>\n",
+                    "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">\n",
+                    "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>\n",
+                    "<style>html,body,#map{height:100%;margin:0}</style></head>",
+                    "<body><div id=\"map\"></div><script>\nconst features = [\n",
+                ),
+                ",\n",
+                concat!(
+                    "\n];\n",
+                    "const map=L.map('map').setView([0,0],2);\n",
+                    "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',",
+                    "{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);\n",
+                    "function esc(s){return String(s).replace(/[&<>\"']/g,c=>",
+                    "({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));}\n",
+                    "const bounds=[];\n",
+                    "for(const f of features){const c=f.geometry.coordinates;const p=f.properties;",
+                    "let h='<b>'+esc(p.name)+'</b>';",
+                    "if(p.timestamp)h+='<br>'+esc(p.timestamp);",
+                    "if(p.thumbnail)h+='<br><img style=\"max-width:160px\" src=\"data:image/jpeg;base64,'+esc(p.thumbnail)+'\">';",
+                    "L.marker([c[1],c[0]]).addTo(map).bindPopup(h);bounds.push([c[1],c[0]]);}\n",
+                    "if(bounds.length)map.fitBounds(bounds,{padding:[20,20]});\n",
+                    "</script></body></html>\n",
+                ),
+                |location| {
+                    let feature = location.as_geojson()?;
+                    // Prevent a `</script>` in a file name from closing the script block.
+                    Ok(feature.replace('<', "\\u003c"))
+                },
             ),
         }
     }

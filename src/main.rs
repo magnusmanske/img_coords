@@ -127,10 +127,10 @@ fn main() -> Result<()> {
     fs.sort(sort);
 
     if thumbnails {
-        if format == OutputFormat::GeoJson {
+        if matches!(format, OutputFormat::GeoJson | OutputFormat::Html) {
             fs.generate_missing_thumbnails();
         } else {
-            eprintln!("Warning: --thumbnails only applies to GeoJSON output; ignoring it");
+            eprintln!("Warning: --thumbnails only applies to GeoJSON/HTML output; ignoring it");
         }
     }
     write_output(&fs, format, output.as_deref())
@@ -159,6 +159,7 @@ fn format_from_extension(path: &Path) -> Option<OutputFormat> {
         "kml" => Some(OutputFormat::Kml),
         "csv" => Some(OutputFormat::Csv),
         "gpx" => Some(OutputFormat::Gpx),
+        "html" | "htm" => Some(OutputFormat::Html),
         "json" | "geojson" => Some(OutputFormat::GeoJson),
         _ => None,
     }
