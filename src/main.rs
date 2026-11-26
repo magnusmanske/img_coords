@@ -65,13 +65,13 @@ struct Cli {
 enum Commands {
     /// Walk a directory tree and collect every geotagged image
     Scan {
-        /// Root directory of the tree to scan (defaults to the current directory)
+        /// Root directories of the trees to scan (defaults to the current directory)
         #[arg(short, long, value_name = "DIR")]
-        dir: Option<PathBuf>,
+        dir: Vec<PathBuf>,
 
-        /// Existing GeoJSON/KML file to update; images already in it are skipped
+        /// Existing GeoJSON/KML files to update; images already in them are skipped
         #[arg(short, long, value_name = "FILE")]
-        update: Option<PathBuf>,
+        update: Vec<PathBuf>,
 
         /// Output file (defaults to STDOUT; use "-" for STDOUT)
         #[arg(short, long, value_name = "FILE")]
@@ -122,9 +122,9 @@ enum Commands {
     ///
     /// Example: find SOME_DIRECTORY | img_coords import --format kml
     Import {
-        /// Existing GeoJSON/KML file to update; images already in it are skipped
+        /// Existing GeoJSON/KML files to update; images already in them are skipped
         #[arg(short, long, value_name = "FILE")]
-        update: Option<PathBuf>,
+        update: Vec<PathBuf>,
 
         /// Output file (defaults to STDOUT; use "-" for STDOUT)
         #[arg(short, long, value_name = "FILE")]
@@ -197,10 +197,6 @@ fn main() -> Result<()> {
         } => {
             fs.set_quiet(quiet);
             fs.set_verbose(verbose);
-            let root = match &dir {
-                Some(dir) => path_to_str(dir)?,
-                None => ".",
-            };
             load_update(&mut fs, &update)?;
             if let Some(date) = &before {
                 fs.set_before(parse_date(date, "before")?);
@@ -208,7 +204,13 @@ fn main() -> Result<()> {
             if let Some(date) = &after {
                 fs.set_after(parse_date(date, "after")?);
             }
-            fs.scan_tree(root)?;
+            if dir.is_empty() {
+                fs.scan_tree(".")?;
+            } else {
+                for root in &dir {
+                    fs.scan_tree(path_to_str(root)?)?;
+                }
+            }
             RunOptions {
                 format: format.map(OutputFormat::from),
                 output,
@@ -308,8 +310,8 @@ fn format_from_extension(path: &Path) -> Option<OutputFormat> {
 }
 
 /// Loads an existing GeoJSON/KML file into the set so its entries can be updated.
-fn load_update(fs: &mut FileSet, update: &Option<PathBuf>) -> Result<()> {
-    if let Some(filename) = update {
+fn load_update(fs: &mut FileSet, updates: &[PathBuf]) -> Result<()> {
+    for filename in updates {
         let s = path_to_str(filename)?;
         fs.load_from_file(s)
             .with_context(|| format!("Failed to load update file '{s}'"))?;

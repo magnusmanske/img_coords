@@ -167,6 +167,22 @@ impl FileSet {
         ))
     }
 
+    /// Merges locations into the set, skipping paths that are already present.
+    fn merge_locations(&mut self, locations: Vec<FileLocation>) {
+        let mut seen: HashSet<PathBuf> = self
+            .file_locations
+            .iter()
+            .map(|location| Self::identity(&location.file))
+            .collect();
+        for location in locations {
+            if seen.insert(Self::identity(&location.file)) {
+                self.file_locations.push(location);
+            } else {
+                self.stats.duplicates += 1;
+            }
+        }
+    }
+
     fn load_from_kml(&mut self, data: &str) -> Result<()> {
         let kml: Kml = data.parse().context("not valid KML")?;
         let mut locations = Vec::new();
@@ -174,7 +190,7 @@ impl FileSet {
         if locations.is_empty() {
             bail!("no placemarks with coordinates found");
         }
-        self.file_locations = locations;
+        self.merge_locations(locations);
         Ok(())
     }
 
@@ -205,7 +221,6 @@ impl FileSet {
     fn load_from_geojson(&mut self, data: &str) -> Result<()> {
         let document: GeoJsonFeatures = serde_json::from_str(data).context("not valid GeoJSON")?;
         if document.features.is_empty() {
-            self.file_locations.clear();
             return Ok(());
         }
         let locations: Vec<FileLocation> = document
@@ -216,7 +231,7 @@ impl FileSet {
         if locations.is_empty() {
             bail!("no features with a name and Point geometry found");
         }
-        self.file_locations = locations;
+        self.merge_locations(locations);
         Ok(())
     }
 
@@ -695,6 +710,19 @@ mod tests {
             1,
             "after is inclusive of the whole day"
         );
+    }
+
+    #[test]
+    fn test_load_from_geojson_merges_files() {
+        let one = r#"{"features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"name":"one.jpg"}}]}"#;
+        let two = r#"{"features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[3,4]},"properties":{"name":"two.jpg"}}]}"#;
+        let mut fs = FileSet::default();
+        fs.load_from_geojson(one).unwrap();
+        fs.load_from_geojson(two).unwrap();
+        assert_eq!(fs.file_locations.len(), 2);
+        // An empty file must not discard what was already loaded.
+        fs.load_from_geojson(r#"{"features":[]}"#).unwrap();
+        assert_eq!(fs.file_locations.len(), 2);
     }
 
     #[test]
