@@ -1,22 +1,51 @@
 use base64::{Engine, engine::general_purpose};
 use exif::{Exif, In, Tag, Value};
-use geojson::GeoJson;
+use geojson::Feature;
 use kml::Kml;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     fs::File,
     io::{BufReader, Cursor},
+    path::Path,
 };
 use thumbnailer::{ThumbnailSize, create_thumbnails};
+
+/// MIME type used to decode an image extension we support. Returns `None` for files
+/// that are not one of the image formats we try to process.
+pub fn image_mime(path: &Path) -> Option<mime::Mime> {
+    let ext = path.extension()?.to_str()?;
+    let is = |name: &str| ext.eq_ignore_ascii_case(name);
+    if is("jpg") || is("jpeg") {
+        Some(mime::IMAGE_JPEG)
+    } else if is("png") {
+        Some(mime::IMAGE_PNG)
+    } else if is("gif") {
+        Some(mime::IMAGE_GIF)
+    } else if is("bmp") {
+        Some(mime::IMAGE_BMP)
+    } else if is("webp") {
+        "image/webp".parse().ok()
+    } else if is("tif") || is("tiff") {
+        "image/tiff".parse().ok()
+    } else if is("heic") {
+        "image/heic".parse().ok()
+    } else if is("heif") {
+        "image/heif".parse().ok()
+    } else if is("avif") {
+        "image/avif".parse().ok()
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
     pub file: String,
     pub latitude: f64,
     pub longitude: f64,
-    pub altitude: Option<f64>,  // ATTENTION sea level implied, not checked
-    pub direction: Option<f64>, // ATTENTION magnetic direction implied, not checked
+    pub altitude: Option<f64>, // negative when below sea level (from GPSAltitudeRef)
+    pub direction: Option<f64>, // GPSImgDirection; magnetic vs. true north is not tracked
     pub thumbnail: Option<String>,
     pub timestamp: Option<String>,
 }
@@ -48,19 +77,21 @@ impl FileLocation {
     }
 
     pub fn as_geojson(&self) -> String {
+        // Altitude is the optional third coordinate element, per the GeoJSON spec.
+        let coordinates = match self.altitude {
+            Some(altitude) => json!([self.longitude, self.latitude, altitude]),
+            None => json!([self.longitude, self.latitude]),
+        };
         let mut j = json!({
             "type": "Feature",
            "geometry": {
                "type": "Point",
-               "coordinates": [self.longitude, self.latitude]
+               "coordinates": coordinates,
            },
            "properties": {
                "name": self.file.to_owned(),
            }
         });
-        if let Some(altitude) = self.altitude {
-            j["properties"]["altitude"] = json!(altitude);
-        }
         if let Some(direction) = self.direction {
             j["properties"]["direction"] = json!(direction);
         }
@@ -80,10 +111,12 @@ impl FileLocation {
     }
 
     fn get_thumbnail_base64(&self) -> Option<String> {
+        // The thumbnailer picks its decoder from the MIME type, so it must match the
+        // actual file format (not always JPEG).
+        let mime = image_mime(Path::new(&self.file))?;
         let file = File::open(&self.file).ok()?;
         let reader = BufReader::new(file);
-        let thumbnail =
-            create_thumbnails(reader, mime::IMAGE_JPEG, [ThumbnailSize::Medium]).ok()?;
+        let thumbnail = create_thumbnails(reader, mime, [ThumbnailSize::Medium]).ok()?;
         let thumbnail = thumbnail.first()?.to_owned();
         let mut buf = Cursor::new(Vec::new());
         thumbnail.write_jpeg(&mut buf, 8).ok()?;
@@ -125,35 +158,38 @@ impl FileLocation {
             .map(|dt| dt.format("%Y:%m:%d %H:%M:%S").to_string())
     }
 
-    pub fn from_geojson_feature(v: &serde_json::Value) -> Option<Self> {
-        let geojson_str = v.to_string();
-        let geojson = geojson_str.parse::<GeoJson>().ok()?;
-        let feature = match geojson {
-            GeoJson::Feature(feature) => feature,
-            _ => return None,
-        };
-        let point = match feature.geometry?.value {
+    /// Builds a location from a typed GeoJSON feature.
+    pub fn from_feature(feature: &Feature) -> Option<Self> {
+        let point = match &feature.geometry.as_ref()?.value {
             geojson::Value::Point(point) => point,
             _ => return None,
         };
-        let properties = feature.properties.unwrap_or_else(serde_json::Map::new);
-        let thumbnail = match properties.get("thumbnail") {
-            Some(s) => s.as_str().map(|s| s.to_string()),
-            None => None,
-        };
-        let timestamp = match properties.get("timestamp") {
-            Some(s) => s.as_str().map(|s| s.to_string()),
-            None => None,
-        };
+        let properties = feature.properties.as_ref();
+        let property = |key: &str| properties.and_then(|p| p.get(key));
         Some(Self {
-            file: properties.get("name")?.as_str()?.to_string(),
+            file: property("name")?.as_str()?.to_string(),
             latitude: *point.get(1)?,
             longitude: *point.first()?,
-            altitude: properties.get("altitude").and_then(|v| v.as_f64()),
-            direction: properties.get("direction").and_then(|v| v.as_f64()),
-            thumbnail,
-            timestamp,
+            // Altitude is the third coordinate per the GeoJSON spec; also accept the
+            // legacy `properties.altitude` emitted by older versions of this tool.
+            altitude: point
+                .get(2)
+                .copied()
+                .or_else(|| property("altitude").and_then(serde_json::Value::as_f64)),
+            direction: property("direction").and_then(serde_json::Value::as_f64),
+            thumbnail: property("thumbnail")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            timestamp: property("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         })
+    }
+
+    /// Convenience wrapper around [`Self::from_feature`] for callers holding a JSON value.
+    pub fn from_geojson_feature(v: &serde_json::Value) -> Option<Self> {
+        let feature: Feature = serde_json::from_value(v.clone()).ok()?;
+        Self::from_feature(&feature)
     }
 
     fn name_xml_escaped(&self) -> String {
@@ -362,6 +398,39 @@ mod tests {
     }
 
     #[test]
+    fn test_from_geojson_feature_altitude_in_coordinates() {
+        let feature: Feature = serde_json::from_value(serde_json::json!({
+            "type": "Feature",
+            "geometry": { "type": "Point", "coordinates": [12.345, 45.6789, 123.5] },
+            "properties": { "name": "x.jpg" }
+        }))
+        .unwrap();
+        let fl = FileLocation::from_feature(&feature).unwrap();
+        assert_eq!(fl.altitude, Some(123.5));
+    }
+
+    #[test]
+    fn test_image_mime_supports_phone_formats() {
+        for (path, expected) in [
+            ("a.JPG", "image/jpeg"),
+            ("a.jpeg", "image/jpeg"),
+            ("a.HEIC", "image/heic"),
+            ("a.heif", "image/heif"),
+            ("a.webp", "image/webp"),
+            ("a.avif", "image/avif"),
+            ("a.png", "image/png"),
+        ] {
+            assert_eq!(
+                image_mime(Path::new(path)).map(|m| m.to_string()),
+                Some(expected.to_string()),
+                "{path}"
+            );
+        }
+        assert!(image_mime(Path::new("a.txt")).is_none());
+        assert!(image_mime(Path::new("no_extension")).is_none());
+    }
+
+    #[test]
     fn test_from_kml_element() {
         let kml = Kml::from_str(
             r#"
@@ -430,7 +499,7 @@ mod tests {
             timestamp: Some("2025:03:06 05:41:42".to_string()),
         };
         let geojson = fl.as_geojson();
-        let expected = r#"{"geometry":{"coordinates":[12.345,45.6789],"type":"Point"},"properties":{"altitude":46.79,"direction":11.0,"name":"test_files/sunrise.jpg","thumbnail":"base64","timestamp":"2025:03:06 05:41:42"},"type":"Feature"}"#;
+        let expected = r#"{"geometry":{"coordinates":[12.345,45.6789,46.79],"type":"Point"},"properties":{"direction":11.0,"name":"test_files/sunrise.jpg","thumbnail":"base64","timestamp":"2025:03:06 05:41:42"},"type":"Feature"}"#;
         assert_eq!(geojson, expected);
     }
 

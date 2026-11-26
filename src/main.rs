@@ -1,63 +1,63 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
-use img_coords::file_set::FileSet;
+use img_coords::file_set::{FileSet, OutputFormat};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(arg_required_else_help = true)]
-#[command(name = "ImageCoordinates")]
-#[command(author = "Magnus Manske <magnusmanske@gmail.com>")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Scans a directory tree for image files with EXIF coordinates and returns a data file", long_about = None)]
+#[command(
+    arg_required_else_help = true,
+    author = "Magnus Manske <magnusmanske@gmail.com>",
+    version,
+    about = "Collect EXIF GPS coordinates from images and export them as GeoJSON or KML"
+)]
 struct Cli {
-    // /// Turn debugging information on
-    // #[arg(short, long, action = clap::ArgAction::Count)]
-    // debug: u8,
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// scans a directory tree
+    /// Walk a directory tree and collect every geotagged image
     Scan {
-        /// Specifies the root directory for the tree to scan
-        #[arg(short, long, value_name = "FILE")]
+        /// Root directory of the tree to scan (defaults to the current directory)
+        #[arg(short, long, value_name = "DIR")]
         dir: Option<PathBuf>,
 
-        /// A file (GeoJSON, KML) to update, ignoring files already in the file
+        /// Existing GeoJSON/KML file to update; images already in it are skipped
         #[arg(short, long, value_name = "FILE")]
         update: Option<PathBuf>,
 
-        /// Specifies the output format [KML, GEOJSON]
-        #[arg(short, long)]
-        format: Option<String>,
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "geojson")]
+        format: OutputFormat,
 
-        /// Generate thumbnails for GeoJSON
+        /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
         thumbnails: bool,
 
-        /// Sets a maximum EXIF timestamp (inclusive) YYYY-MM-DD
-        #[arg(short, long)]
+        /// Only include images taken on or before this date (YYYY-MM-DD)
+        #[arg(short, long, value_name = "DATE")]
         before: Option<String>,
 
-        /// Sets a minimum EXIF timestamp (inclusive) YYYY-MM-DD
-        #[arg(short, long)]
+        /// Only include images taken on or after this date (YYYY-MM-DD)
+        #[arg(short, long, value_name = "DATE")]
         after: Option<String>,
     },
 
-    /// imports a list of files from STDIN, eg. `find SOME_DIRECTORY | img_coords`
+    /// Read image paths from STDIN and collect their geotags
+    ///
+    /// Example: find SOME_DIRECTORY | img_coords import --format kml
     Import {
-        /// A file (GeoJSON, KML) to update, ignoring files already in the file
+        /// Existing GeoJSON/KML file to update; images already in it are skipped
         #[arg(short, long, value_name = "FILE")]
         update: Option<PathBuf>,
 
-        /// Specifies the output format [KML, GEOJSON, JSON (default)]
-        #[arg(short, long)]
-        format: Option<String>,
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "geojson")]
+        format: OutputFormat,
 
-        /// Generate thumbnails for GeoJSON
+        /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
         thumbnails: bool,
     },
@@ -65,49 +65,49 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match &cli.command {
-        Some(Commands::Scan {
+    let mut fs = FileSet::default();
+    let (format, thumbnails) = match cli.command {
+        Commands::Scan {
             dir,
             update,
             format,
             thumbnails,
             before,
             after,
-        }) => {
-            let root = match dir {
+        } => {
+            let root = match &dir {
                 Some(dir) => path_to_str(dir)?,
                 None => ".",
             };
-            let mut fs = FileSet::default();
-            load_update(&mut fs, update)?;
-            if let Some(date) = before {
+            load_update(&mut fs, &update)?;
+            if let Some(date) = &before {
                 fs.set_before(parse_date(date, "before")?);
             }
-            if let Some(date) = after {
+            if let Some(date) = &after {
                 fs.set_after(parse_date(date, "after")?);
             }
             fs.scan_tree(root)?;
-            if *thumbnails {
-                fs.generate_missing_thumbnails();
-            }
-            fs.output(format)?;
+            (format, thumbnails)
         }
-        Some(Commands::Import {
+        Commands::Import {
             update,
             format,
             thumbnails,
-        }) => {
-            let mut fs = FileSet::default();
-            load_update(&mut fs, update)?;
+        } => {
+            load_update(&mut fs, &update)?;
             fs.import_files();
-            if *thumbnails {
-                fs.generate_missing_thumbnails();
-            }
-            fs.output(format)?;
+            (format, thumbnails)
         }
-        None => {} // Never gets called
+    };
+
+    if thumbnails {
+        if format == OutputFormat::GeoJson {
+            fs.generate_missing_thumbnails();
+        } else {
+            eprintln!("Warning: --thumbnails only applies to GeoJSON output; ignoring it for KML");
+        }
     }
-    Ok(())
+    fs.output(format)
 }
 
 /// Loads an existing GeoJSON/KML file into the set so its entries can be updated.

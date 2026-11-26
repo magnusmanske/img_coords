@@ -693,7 +693,6 @@ dependencies = [
  "latlon",
  "mime",
  "rayon",
- "regex",
  "serde",
  "serde_json",
  "thumbnailer",

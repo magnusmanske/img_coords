@@ -10,7 +10,6 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
-regex = "1"
 kamadak-exif = "0.5"
 latlon = "0.1"
 serde_json = "1"

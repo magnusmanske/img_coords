@@ -1,21 +1,30 @@
-use crate::file_location::FileLocation;
+use crate::file_location::{FileLocation, image_mime};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use jwalk::WalkDir;
 use jwalk::rayon::prelude::*;
 use kml::Kml;
-use regex::{Regex, RegexBuilder};
+use serde::Deserialize;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::{collections::HashSet, fs};
 
-static RE_VALID_FILE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
-    RegexBuilder::new(r"\.(png|gif|tif|tiff|jpg|jpeg)$")
-        .case_insensitive(true)
-        .build()
-        .expect("re_valid_file_type does not compile")
-});
+/// Output format for the collected locations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    #[value(name = "geojson", alias = "json")]
+    GeoJson,
+    #[value(name = "kml")]
+    Kml,
+}
+
+/// Minimal view of a GeoJSON document, deserialized into typed features so we never
+/// have to round-trip each feature through a string.
+#[derive(Deserialize)]
+struct GeoJsonFeatures {
+    features: Vec<geojson::Feature>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct FileSet {
@@ -87,62 +96,79 @@ impl FileSet {
     }
 
     fn load_from_geojson(&mut self, data: &str) -> Result<()> {
-        let res: serde_json::Value = serde_json::from_str(data).context("not valid JSON")?;
-        let features = res
-            .get("features")
-            .context("missing 'features' field")?
-            .as_array()
-            .context("'features' is not an array")?;
-        self.file_locations = features
+        let document: GeoJsonFeatures = serde_json::from_str(data).context("not valid GeoJSON")?;
+        if document.features.is_empty() {
+            self.file_locations.clear();
+            return Ok(());
+        }
+        let locations: Vec<FileLocation> = document
+            .features
             .par_iter()
-            .filter_map(FileLocation::from_geojson_feature)
+            .filter_map(FileLocation::from_feature)
             .collect();
+        if locations.is_empty() {
+            bail!("no features with a name and Point geometry found");
+        }
+        self.file_locations = locations;
         Ok(())
     }
 
     pub fn scan_tree(&mut self, root: &str) -> Result<()> {
-        // jwalk defers access errors to iteration (where they'd be silently dropped by
-        // `f.ok()`), so check the root up front to give a clear message for a bad path.
         let meta =
             fs::metadata(root).with_context(|| format!("Cannot access directory '{root}'"))?;
         if !meta.is_dir() {
             bail!("'{root}' is not a directory");
         }
 
-        // The directory walk itself is parallelized internally by jwalk. We collect
-        // the raw paths first, then fan out the expensive per-file work (extension
-        // filtering + `canonicalize` syscall) across the rayon thread pool. Filtering
-        // by extension *before* canonicalizing avoids a syscall for every non-image.
-        let paths: Vec<PathBuf> = WalkDir::new(root)
-            // .follow_links(true)
-            .try_into_iter()
-            .with_context(|| format!("Failed to scan directory tree at '{root}'"))?
-            .filter_map(|f| f.ok())
-            .map(|f| f.path())
-            .collect();
+        // Resolve the root once instead of calling `canonicalize` for every discovered
+        // file; the walk then yields absolute, stable paths that dedup can use as-is.
+        let root =
+            fs::canonicalize(root).with_context(|| format!("Cannot resolve directory '{root}'"))?;
 
-        let file_candidates = paths
-            .into_par_iter()
-            .filter(|p| Self::has_valid_extension(p))
-            .filter_map(|p| p.canonicalize().ok())
-            .filter_map(|p| p.to_str().map(|p| p.to_string()))
-            .collect();
-        self.add_files(file_candidates);
+        // jwalk parallelizes the directory reads internally; we filter by extension while
+        // consuming the walk so we only allocate strings for actual image candidates.
+        let mut file_candidates = Vec::new();
+        let entries = WalkDir::new(&root)
+            .try_into_iter()
+            .with_context(|| format!("Failed to scan directory tree at '{}'", root.display()))?;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    eprintln!("Warning: skipping unreadable entry: {err}");
+                    continue;
+                }
+            };
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            // Check the extension on the file name first so we only build a full path for
+            // actual image candidates.
+            if image_mime(Path::new(entry.file_name())).is_none() {
+                continue;
+            }
+            let path = entry.path();
+            if let Some(path) = path.to_str() {
+                file_candidates.push(path.to_string());
+            }
+        }
+        self.add_files(file_candidates, true);
         Ok(())
     }
 
-    fn has_valid_extension(path: &Path) -> bool {
-        path.to_str()
-            .is_some_and(|s| RE_VALID_FILE_TYPE.is_match(s))
-    }
-
     pub fn import_files(&mut self) {
-        let file = io::stdin();
-        let file_candidates = io::BufReader::new(file)
+        let stdin = io::stdin();
+        let file_candidates = io::BufReader::new(stdin)
             .lines()
-            .map_while(Result::ok)
+            .map_while(|line| match line {
+                Ok(line) => Some(line),
+                Err(err) => {
+                    eprintln!("Warning: stopped reading file list: {err}");
+                    None
+                }
+            })
             .collect();
-        self.add_files(file_candidates);
+        self.add_files(file_candidates, false);
     }
 
     /// Filesystem identity of an entry, used for deduplication. `scan` stores canonical
@@ -154,10 +180,10 @@ impl FileSet {
             .unwrap_or_else(|_| PathBuf::from(path))
     }
 
-    fn add_files(&mut self, file_candidates: Vec<String>) {
-        // Deduplicate against existing entries and within the batch itself, so the same
-        // image reached via different spellings (relative vs. absolute, scan vs. import)
-        // or listed twice is only added once. The original spelling is preserved.
+    /// Adds candidates, skipping ones already present or repeated within the batch.
+    /// `candidates_canonical` tells us the paths are already canonical (as produced by
+    /// `scan_tree`), so deduplication can avoid a `canonicalize` syscall per file.
+    fn add_files(&mut self, file_candidates: Vec<String>, candidates_canonical: bool) {
         let mut seen: HashSet<PathBuf> = self
             .file_locations
             .par_iter()
@@ -165,8 +191,15 @@ impl FileSet {
             .collect();
         let mut candidates: Vec<(PathBuf, String)> = file_candidates
             .into_par_iter()
-            .filter(|f| RE_VALID_FILE_TYPE.is_match(f)) // Wrong file ending
-            .map(|f| (Self::identity(&f), f))
+            .filter(|f| image_mime(Path::new(f.as_str())).is_some())
+            .map(|f| {
+                let id = if candidates_canonical {
+                    PathBuf::from(f.as_str())
+                } else {
+                    Self::identity(&f)
+                };
+                (id, f)
+            })
             .collect();
         candidates.retain(|(id, _)| seen.insert(id.clone()));
 
@@ -192,20 +225,14 @@ impl FileSet {
             .for_each(|fl| fl.generate_missing_thumbnail());
     }
 
-    pub fn output(&self, format: &Option<String>) -> Result<()> {
+    pub fn output(&self, format: OutputFormat) -> Result<()> {
         // Lock stdout once and wrap it in a BufWriter: a `println!` per feature would
         // otherwise re-acquire the lock and flush on every line. The per-feature
         // serialization is built in parallel first, since it dominates for large sets.
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
-        match format
-            .to_owned()
-            .unwrap_or("geojson".to_string())
-            .trim()
-            .to_lowercase()
-            .as_str()
-        {
-            "kml" => {
+        match format {
+            OutputFormat::Kml => {
                 let bodies: Vec<String> = self
                     .file_locations
                     .par_iter()
@@ -220,7 +247,7 @@ impl FileSet {
                 writeln!(out, r#"</Document>"#)?;
                 writeln!(out, r#"</kml>"#)?;
             }
-            "geojson" => {
+            OutputFormat::GeoJson => {
                 let features: Vec<String> = self
                     .file_locations
                     .par_iter()
@@ -234,7 +261,6 @@ impl FileSet {
                 }
                 writeln!(out, r#"]}}"#)?;
             }
-            other => bail!("Unknown output format '{other}' (expected 'geojson' or 'kml')"),
         }
         out.flush().context("Failed to write output")?;
         Ok(())
@@ -287,11 +313,14 @@ mod tests {
     #[test]
     fn test_add_files_filters_extension_and_missing() {
         let mut fs = FileSet::default();
-        fs.add_files(vec![
-            "test_files/sunrise.jpg".to_string(), // valid image, exists
-            "test_files/sunrise.txt".to_string(), // wrong extension -> filtered
-            "test_files/missing.jpg".to_string(), // right extension, does not exist -> dropped
-        ]);
+        fs.add_files(
+            vec![
+                "test_files/sunrise.jpg".to_string(), // valid image, exists
+                "test_files/sunrise.txt".to_string(), // wrong extension -> filtered
+                "test_files/missing.jpg".to_string(), // right extension, does not exist -> dropped
+            ],
+            false,
+        );
         assert_eq!(fs.file_locations.len(), 1);
         assert_eq!(fs.file_locations[0].file, "test_files/sunrise.jpg");
     }
@@ -301,7 +330,7 @@ mod tests {
         let mut fs = FileSet::default();
         fs.file_locations.push(location("test_files/sunrise.jpg"));
         // Same path offered again: must not be read/added a second time.
-        fs.add_files(vec!["test_files/sunrise.jpg".to_string()]);
+        fs.add_files(vec!["test_files/sunrise.jpg".to_string()], false);
         assert_eq!(fs.file_locations.len(), 1);
     }
 
@@ -309,10 +338,13 @@ mod tests {
     fn test_add_files_dedups_within_batch() {
         let mut fs = FileSet::default();
         // The same file listed twice (e.g. duplicated `find` output) is added once.
-        fs.add_files(vec![
-            "test_files/sunrise.jpg".to_string(),
-            "test_files/sunrise.jpg".to_string(),
-        ]);
+        fs.add_files(
+            vec![
+                "test_files/sunrise.jpg".to_string(),
+                "test_files/sunrise.jpg".to_string(),
+            ],
+            false,
+        );
         assert_eq!(fs.file_locations.len(), 1);
     }
 
@@ -327,7 +359,7 @@ mod tests {
             .to_string();
         let mut fs = FileSet::default();
         fs.file_locations.push(location("test_files/sunrise.jpg"));
-        fs.add_files(vec![absolute]);
+        fs.add_files(vec![absolute], false);
         assert_eq!(fs.file_locations.len(), 1);
     }
 
@@ -340,7 +372,7 @@ mod tests {
                 after,
                 ..Default::default()
             };
-            fs.add_files(vec!["test_files/sunrise.jpg".to_string()]);
+            fs.add_files(vec!["test_files/sunrise.jpg".to_string()], false);
             fs.file_locations.len()
         };
 
@@ -406,7 +438,29 @@ mod tests {
         let err = fs
             .load_from_geojson(r#"{"type":"FeatureCollection"}"#)
             .unwrap_err();
-        assert!(err.to_string().contains("features"));
+        assert!(
+            format!("{err:#}").contains("features"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_geojson_rejects_features_without_locations() {
+        // Non-empty input that yields no usable entries is an error, not silently empty.
+        let data = r#"{"type":"FeatureCollection","features":[
+            {"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},
+             "properties":{}}
+        ]}"#;
+        let mut fs = FileSet::default();
+        assert!(fs.load_from_geojson(data).is_err());
+    }
+
+    #[test]
+    fn test_load_from_geojson_accepts_empty_feature_collection() {
+        let data = r#"{"type":"FeatureCollection","features":[]}"#;
+        let mut fs = FileSet::default();
+        fs.load_from_geojson(data).unwrap();
+        assert!(fs.file_locations.is_empty());
     }
 
     #[test]

@@ -8,8 +8,11 @@
 
 ## About
 This executable can scan a directory tree on your disk, find all images with EXIF data containing coordinates, and collect them into a single file.
-Output can be either [GeoJSON](https://geojson.org/) (default), or KML. JSON also contains the timestamp the image was taken, and the camera direction, if available in EXIF.
-Use `--thumbnails` to add `base64`-encoded thumbnails to the `GeoJSON` output.
+Output can be either [GeoJSON](https://geojson.org/) (default) or KML. Both formats include the timestamp the image was taken and the camera direction, if available in EXIF.
+GeoJSON also stores altitude as the point's third coordinate and can embed `base64`-encoded JPEG thumbnails.
+
+Supported image extensions are `jpg`/`jpeg`, `png`, `gif`, `tif`/`tiff`, `webp`, `bmp`, `heic`/`heif`, and `avif`.
+Coordinates are read from EXIF, so any format carrying an EXIF block works; thumbnails are only produced for formats the image decoder can read (typically not HEIC/HEIF/AVIF).
 
 ## Installation
 [Install Rust](https://rust-lang.org/tools/install/) first, if not installed already. Then:
@@ -26,17 +29,36 @@ cargo uninstall img_coords
 ```
 
 ## Example
+Write GeoJSON, with thumbnails, to STDOUT:
+```
+img_coords scan --dir SOME_ROOT_DIRECTORY --thumbnails
+```
+
 Write a KML file to STDOUT:
 ```
-img_coords scan --dir SOME_ROOT_DIRECTORY --format kml --thumbnails
+img_coords scan --dir SOME_ROOT_DIRECTORY --format kml
 ```
-Use a previously generated KML file and only scan/add files not in there:
+
+Use a previously generated GeoJSON/KML file and only add files not in there:
 ```
-img_coords scan --dir SOME_ROOT_DIRECTORY --format kml --update EXISTING.KML
+img_coords scan --dir SOME_ROOT_DIRECTORY --update EXISTING.kml
 ```
-Use `find` command (can be faster than the build-in `scan` command in some cases) to generate a file list:
+
+Limit the result to a date range (both bounds are inclusive, `YYYY-MM-DD`):
+```
+img_coords scan --dir SOME_ROOT_DIRECTORY --after 2024-01-01 --before 2024-12-31
+```
+
+Import a list of file paths from STDIN instead of walking a directory:
 ```
 find SOME_ROOT_DIRECTORY | img_coords import --format kml
 ```
 
-Run `img_coords` or `img_coords scan` to get help.
+`--thumbnails` applies to GeoJSON only; KML has no thumbnail support, so the
+flag is ignored (with a warning) when combined with `--format kml`.
+
+`scan` walks the tree in parallel and is typically the fastest option. `import`
+is useful when you already have a list of paths, or want to combine it with
+another tool; it does not walk the filesystem itself.
+
+Run `img_coords` or `img_coords <COMMAND> --help` to get help.
