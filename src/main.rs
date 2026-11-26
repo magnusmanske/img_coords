@@ -119,7 +119,9 @@ fn main() -> Result<()> {
             eprintln!("Warning: --thumbnails only applies to GeoJSON output; ignoring it for KML");
         }
     }
-    fs.output(format)
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    fs.write_to(&mut out, format)
 }
 
 /// Loads an existing GeoJSON/KML file into the set so its entries can be updated.

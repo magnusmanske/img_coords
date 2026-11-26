@@ -250,12 +250,7 @@ impl FileSet {
             .for_each(|fl| fl.generate_missing_thumbnail());
     }
 
-    pub fn output(&self, format: OutputFormat) -> Result<()> {
-        // Lock stdout once and wrap it in a BufWriter: a `println!` per feature would
-        // otherwise re-acquire the lock and flush on every line. The per-feature
-        // serialization is built in parallel first, since it dominates for large sets.
-        let stdout = io::stdout();
-        let mut out = io::BufWriter::new(stdout.lock());
+    pub fn write_to<W: Write>(&self, mut out: W, format: OutputFormat) -> Result<()> {
         match format {
             OutputFormat::Kml => {
                 let bodies: Vec<String> = self
@@ -386,6 +381,16 @@ mod tests {
         fs.file_locations.push(location("test_files/sunrise.jpg"));
         fs.add_files(vec![absolute], false);
         assert_eq!(fs.file_locations.len(), 1);
+    }
+
+    #[test]
+    fn test_write_to_writer() {
+        let mut fs = FileSet::default();
+        fs.file_locations.push(location("a.jpg"));
+        let mut out = Vec::new();
+        fs.write_to(&mut out, OutputFormat::GeoJson).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\"a.jpg\""));
     }
 
     #[test]
