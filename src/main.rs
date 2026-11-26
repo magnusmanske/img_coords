@@ -109,6 +109,10 @@ enum Commands {
         #[arg(long)]
         dedupe_by_exif: bool,
 
+        /// Re-read images already present in the update file(s)
+        #[arg(long)]
+        refresh: bool,
+
         /// Suppress progress and summary output on stderr
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -154,6 +158,10 @@ enum Commands {
         #[arg(long)]
         dedupe_by_exif: bool,
 
+        /// Re-read images already present in the update file(s)
+        #[arg(long)]
+        refresh: bool,
+
         /// Suppress progress and summary output on stderr
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -192,11 +200,13 @@ fn main() -> Result<()> {
             bbox,
             near,
             dedupe_by_exif,
+            refresh,
             quiet,
             verbose,
         } => {
             fs.set_quiet(quiet);
             fs.set_verbose(verbose);
+            fs.set_refresh(refresh);
             load_update(&mut fs, &update)?;
             if let Some(date) = &before {
                 fs.set_before(parse_date(date, "before")?);
@@ -231,11 +241,13 @@ fn main() -> Result<()> {
             bbox,
             near,
             dedupe_by_exif,
+            refresh,
             quiet,
             verbose,
         } => {
             fs.set_quiet(quiet);
             fs.set_verbose(verbose);
+            fs.set_refresh(refresh);
             load_update(&mut fs, &update)?;
             fs.import_files();
             RunOptions {

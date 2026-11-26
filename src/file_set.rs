@@ -50,6 +50,7 @@ pub struct FileSet {
     after: Option<NaiveDate>,
     verbose: bool,
     quiet: bool,
+    refresh: bool,
     stats: Stats,
 }
 
@@ -59,6 +60,7 @@ pub struct Stats {
     pub seen: usize,
     pub candidates: usize,
     pub added: usize,
+    pub refreshed: usize,
     pub duplicates: usize,
     pub skipped: HashMap<SkipReason, usize>,
 }
@@ -83,8 +85,8 @@ impl Stats {
             format!(", skipped: {}", skipped.join(", "))
         };
         format!(
-            "Seen {} entries, {} image candidates, added {} geotagged images ({} duplicates{skipped})",
-            self.seen, self.candidates, self.added, self.duplicates
+            "Seen {} entries, {} image candidates, added {} geotagged images ({} refreshed, {} duplicates{skipped})",
+            self.seen, self.candidates, self.added, self.refreshed, self.duplicates
         )
     }
 }
@@ -96,6 +98,10 @@ impl FileSet {
 
     pub fn set_quiet(&mut self, quiet: bool) {
         self.quiet = quiet;
+    }
+
+    pub fn set_refresh(&mut self, refresh: bool) {
+        self.refresh = refresh;
     }
 
     pub fn stats(&self) -> &Stats {
@@ -321,37 +327,55 @@ impl FileSet {
             .collect();
         self.stats.candidates += file_candidates.len();
 
-        let mut seen: HashSet<PathBuf> = self
+        let existing: HashMap<PathBuf, usize> = self
             .file_locations
-            .par_iter()
-            .map(|fl| Self::identity(&fl.file))
+            .iter()
+            .enumerate()
+            .map(|(index, location)| (Self::identity(&location.file), index))
             .collect();
         let offered = file_candidates.len();
-        let mut candidates: Vec<(PathBuf, String)> = file_candidates
+        let mut candidates: Vec<(PathBuf, String, Option<usize>)> = file_candidates
             .into_par_iter()
-            .map(|f| {
-                let id = if candidates_canonical {
-                    PathBuf::from(f.as_str())
+            .map(|path| {
+                let identity = if candidates_canonical {
+                    PathBuf::from(path.as_str())
                 } else {
-                    Self::identity(&f)
+                    Self::identity(&path)
                 };
-                (id, f)
+                let index = existing.get(&identity).copied();
+                (identity, path, index)
             })
             .collect();
-        candidates.retain(|(id, _)| seen.insert(id.clone()));
+        let refresh = self.refresh;
+        let mut batch_seen: HashSet<PathBuf> = HashSet::new();
+        candidates.retain(|(identity, _, index)| {
+            if !batch_seen.insert(identity.clone()) {
+                return false;
+            }
+            index.is_none() || refresh
+        });
         self.stats.duplicates += offered - candidates.len();
 
-        let results: Vec<(String, Result<FileLocation, SkipReason>)> = candidates
+        let results: Vec<(String, Result<FileLocation, SkipReason>, Option<usize>)> = candidates
             .into_par_iter()
-            .map(|(_, path)| {
+            .map(|(_, path, index)| {
                 let result = FileLocation::from_file(&path);
-                (path, result)
+                (path, result, index)
             })
             .collect();
         let mut new_file_locations = Vec::new();
-        for (path, result) in results {
+        for (path, result, index) in results {
             match result {
-                Ok(location) => new_file_locations.push(location),
+                Ok(mut location) => match index {
+                    Some(index) => {
+                        if location.thumbnail.is_none() {
+                            location.thumbnail = self.file_locations[index].thumbnail.clone();
+                        }
+                        self.file_locations[index] = location;
+                        self.stats.refreshed += 1;
+                    }
+                    None => new_file_locations.push(location),
+                },
                 Err(reason) => {
                     *self.stats.skipped.entry(reason).or_default() += 1;
                     if self.verbose {
@@ -639,6 +663,24 @@ mod tests {
 
         fs.sort(SortKey::None);
         assert_eq!(files(&fs), ["c.jpg", "b.jpg", "a.jpg"]);
+    }
+
+    #[test]
+    fn test_refresh_replaces_existing_entry() {
+        let mut fs = FileSet::default();
+        let mut existing = location("test_files/sunrise.jpg");
+        existing.thumbnail = Some("keep".to_string());
+        fs.file_locations.push(existing);
+        fs.set_refresh(true);
+        fs.add_files(vec!["test_files/sunrise.jpg".to_string()], false);
+        assert_eq!(fs.file_locations.len(), 1);
+        assert_eq!(
+            fs.file_locations[0].timestamp.as_deref(),
+            Some("2025:03:06 05:41:42")
+        );
+        // The refreshed location has no thumbnail, so the old one is preserved.
+        assert_eq!(fs.file_locations[0].thumbnail.as_deref(), Some("keep"));
+        assert_eq!(fs.stats().refreshed, 1);
     }
 
     #[test]
