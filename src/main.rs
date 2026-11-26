@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand, ValueEnum};
 use img_coords::file_set::{FileSet, OutputFormat, SortKey};
+use img_coords::filter::{Bbox, Near};
 use std::path::{Path, PathBuf};
 
 /// Command-line wrapper around [`OutputFormat`].
@@ -96,6 +97,14 @@ enum Commands {
         #[arg(short, long, value_name = "DATE")]
         after: Option<String>,
 
+        /// Keep only images inside MIN_LON,MIN_LAT,MAX_LON,MAX_LAT
+        #[arg(long, value_name = "BOUNDS")]
+        bbox: Option<String>,
+
+        /// Keep only images within RADIUS_KM of LAT,LON
+        #[arg(long, value_name = "LAT,LON,RADIUS_KM")]
+        near: Option<String>,
+
         /// Suppress progress and summary output on stderr
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -129,6 +138,14 @@ enum Commands {
         #[arg(short, long)]
         thumbnails: bool,
 
+        /// Keep only images inside MIN_LON,MIN_LAT,MAX_LON,MAX_LAT
+        #[arg(long, value_name = "BOUNDS")]
+        bbox: Option<String>,
+
+        /// Keep only images within RADIUS_KM of LAT,LON
+        #[arg(long, value_name = "LAT,LON,RADIUS_KM")]
+        near: Option<String>,
+
         /// Suppress progress and summary output on stderr
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -142,7 +159,7 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut fs = FileSet::default();
-    let (format, thumbnails, sort, output, quiet) = match cli.command {
+    let (format, thumbnails, sort, output, quiet, bbox, near) = match cli.command {
         Commands::Scan {
             dir,
             update,
@@ -152,6 +169,8 @@ fn main() -> Result<()> {
             thumbnails,
             before,
             after,
+            bbox,
+            near,
             quiet,
             verbose,
         } => {
@@ -169,7 +188,7 @@ fn main() -> Result<()> {
                 fs.set_after(parse_date(date, "after")?);
             }
             fs.scan_tree(root)?;
-            (format, thumbnails, sort, output, quiet)
+            (format, thumbnails, sort, output, quiet, bbox, near)
         }
         Commands::Import {
             update,
@@ -177,6 +196,8 @@ fn main() -> Result<()> {
             format,
             sort,
             thumbnails,
+            bbox,
+            near,
             quiet,
             verbose,
         } => {
@@ -184,9 +205,16 @@ fn main() -> Result<()> {
             fs.set_verbose(verbose);
             load_update(&mut fs, &update)?;
             fs.import_files();
-            (format, thumbnails, sort, output, quiet)
+            (format, thumbnails, sort, output, quiet, bbox, near)
         }
     };
+
+    if let Some(bbox) = bbox.as_deref().map(parse_bbox).transpose()? {
+        fs.retain(|location| bbox.contains(location.latitude, location.longitude));
+    }
+    if let Some(near) = near.as_deref().map(parse_near).transpose()? {
+        fs.retain(|location| near.contains(location.latitude, location.longitude));
+    }
 
     let format = format
         .map(OutputFormat::from)
@@ -251,6 +279,17 @@ fn parse_date(date: &str, which: &str) -> Result<NaiveDate> {
     const DATE_FORMAT: &str = "%Y-%m-%d";
     NaiveDate::parse_from_str(date, DATE_FORMAT)
         .with_context(|| format!("Invalid --{which} date '{date}', expected YYYY-MM-DD"))
+}
+
+fn parse_bbox(text: &str) -> Result<Bbox> {
+    Bbox::parse(text).with_context(|| {
+        format!("Invalid --bbox '{text}', expected MIN_LON,MIN_LAT,MAX_LON,MAX_LAT")
+    })
+}
+
+fn parse_near(text: &str) -> Result<Near> {
+    Near::parse(text)
+        .with_context(|| format!("Invalid --near '{text}', expected LAT,LON,RADIUS_KM"))
 }
 
 fn path_to_str(path: &Path) -> Result<&str> {

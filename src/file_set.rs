@@ -102,6 +102,11 @@ impl FileSet {
         &self.stats
     }
 
+    /// Keeps only the locations matching `predicate`.
+    pub fn retain<F: Fn(&FileLocation) -> bool>(&mut self, predicate: F) {
+        self.file_locations.retain(predicate);
+    }
+
     pub fn set_before(&mut self, date: NaiveDate) {
         self.before = Some(date);
     }
