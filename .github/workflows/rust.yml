@@ -95,8 +95,13 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not configured; skipping crates.io publish."
+            exit 0
+          fi
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if curl -fsSL "https://crates.io/api/v1/crates/img_coords" \
+          if curl -fsSL -A "img_coords-release-workflow (https://github.com/magnusmanske/img_coords)" \
+              "https://crates.io/api/v1/crates/img_coords" \
               | jq -e --arg v "$version" '.versions[] | select(.num == $v)' > /dev/null; then
             echo "img_coords $version is already published; skipping."
             exit 0
