@@ -28,9 +28,13 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         update: Option<PathBuf>,
 
-        /// Output format
-        #[arg(short, long, value_enum, default_value = "geojson")]
-        format: OutputFormat,
+        /// Output file (defaults to STDOUT; use "-" for STDOUT)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format (inferred from the output extension, else GeoJSON)
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
 
         /// Order of the output features
         #[arg(short = 's', long, value_enum, default_value = "path")]
@@ -57,9 +61,13 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         update: Option<PathBuf>,
 
-        /// Output format
-        #[arg(short, long, value_enum, default_value = "geojson")]
-        format: OutputFormat,
+        /// Output file (defaults to STDOUT; use "-" for STDOUT)
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format (inferred from the output extension, else GeoJSON)
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
 
         /// Order of the output features
         #[arg(short = 's', long, value_enum, default_value = "path")]
@@ -74,10 +82,11 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut fs = FileSet::default();
-    let (format, thumbnails, sort) = match cli.command {
+    let (format, thumbnails, sort, output) = match cli.command {
         Commands::Scan {
             dir,
             update,
+            output,
             format,
             sort,
             thumbnails,
@@ -96,19 +105,24 @@ fn main() -> Result<()> {
                 fs.set_after(parse_date(date, "after")?);
             }
             fs.scan_tree(root)?;
-            (format, thumbnails, sort)
+            (format, thumbnails, sort, output)
         }
         Commands::Import {
             update,
+            output,
             format,
             sort,
             thumbnails,
         } => {
             load_update(&mut fs, &update)?;
             fs.import_files();
-            (format, thumbnails, sort)
+            (format, thumbnails, sort, output)
         }
     };
+
+    let format = format
+        .or_else(|| output.as_deref().and_then(format_from_extension))
+        .unwrap_or_default();
 
     fs.sort(sort);
 
@@ -119,9 +133,33 @@ fn main() -> Result<()> {
             eprintln!("Warning: --thumbnails only applies to GeoJSON output; ignoring it for KML");
         }
     }
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::new(stdout.lock());
-    fs.write_to(&mut out, format)
+    write_output(&fs, format, output.as_deref())
+}
+
+/// Writes the collected locations to `output`, or to STDOUT when no file (or `-`) is given.
+fn write_output(fs: &FileSet, format: OutputFormat, output: Option<&Path>) -> Result<()> {
+    match output {
+        Some(path) if path != Path::new("-") => {
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("Failed to create output file '{path:?}'"))?;
+            let mut out = std::io::BufWriter::new(file);
+            fs.write_to(&mut out, format)
+        }
+        _ => {
+            let stdout = std::io::stdout();
+            let mut out = std::io::BufWriter::new(stdout.lock());
+            fs.write_to(&mut out, format)
+        }
+    }
+}
+
+/// Infers the output format from a file extension.
+fn format_from_extension(path: &Path) -> Option<OutputFormat> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "kml" => Some(OutputFormat::Kml),
+        "json" | "geojson" => Some(OutputFormat::GeoJson),
+        _ => None,
+    }
 }
 
 /// Loads an existing GeoJSON/KML file into the set so its entries can be updated.
