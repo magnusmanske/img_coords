@@ -131,12 +131,35 @@ struct GeoJsonProperties<'a> {
     thumbnail: Option<&'a str>,
 }
 
+/// Why a candidate file did not produce a location.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SkipReason {
+    OpenFailed,
+    NoExif,
+    MissingGpsReference,
+    MissingCoordinates,
+    InvalidCoordinates,
+}
+
+impl SkipReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::OpenFailed => "cannot open file",
+            Self::NoExif => "no readable EXIF data",
+            Self::MissingGpsReference => "missing GPS hemisphere reference",
+            Self::MissingCoordinates => "no GPS coordinates",
+            Self::InvalidCoordinates => "invalid GPS coordinates",
+        }
+    }
+}
+
 impl FileLocation {
-    pub fn from_file(file_name: &str) -> Option<Self> {
-        let file = std::fs::File::open(file_name).ok()?;
+    pub fn from_file(file_name: &str) -> Result<Self, SkipReason> {
+        let file = std::fs::File::open(file_name).map_err(|_| SkipReason::OpenFailed)?;
         let mut bufreader = std::io::BufReader::new(&file);
-        let exifreader = exif::Reader::new();
-        let exif = exifreader.read_from_container(&mut bufreader).ok()?;
+        let exif = exif::Reader::new()
+            .read_from_container(&mut bufreader)
+            .map_err(|_| SkipReason::NoExif)?;
         Self::from_exif(file_name, &exif)
     }
 
@@ -323,22 +346,32 @@ impl FileLocation {
             .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S").ok())
     }
 
-    fn from_exif(file: &str, exif: &Exif) -> Option<Self> {
+    fn from_exif(file: &str, exif: &Exif) -> Result<Self, SkipReason> {
+        let lat_ref_field = exif
+            .get_field(Tag::GPSLatitudeRef, In::PRIMARY)
+            .ok_or(SkipReason::MissingGpsReference)?;
         let lat_ref =
-            Self::letter_from_value(&exif.get_field(Tag::GPSLatitudeRef, In::PRIMARY)?.value)?;
+            Self::letter_from_value(&lat_ref_field.value).ok_or(SkipReason::InvalidCoordinates)?;
+        let lon_ref_field = exif
+            .get_field(Tag::GPSLongitudeRef, In::PRIMARY)
+            .ok_or(SkipReason::MissingGpsReference)?;
         let lon_ref =
-            Self::letter_from_value(&exif.get_field(Tag::GPSLongitudeRef, In::PRIMARY)?.value)?;
+            Self::letter_from_value(&lon_ref_field.value).ok_or(SkipReason::InvalidCoordinates)?;
+        let lat_field = exif
+            .get_field(Tag::GPSLatitude, In::PRIMARY)
+            .ok_or(SkipReason::MissingCoordinates)?;
+        let lon_field = exif
+            .get_field(Tag::GPSLongitude, In::PRIMARY)
+            .ok_or(SkipReason::MissingCoordinates)?;
+        let latitude = Self::lat_from_value(&lat_field.value, lat_ref)
+            .ok_or(SkipReason::InvalidCoordinates)?;
+        let longitude = Self::lon_from_value(&lon_field.value, lon_ref)
+            .ok_or(SkipReason::InvalidCoordinates)?;
         let timestamp = Self::string_from_value(exif.get_field(Tag::DateTimeOriginal, In::PRIMARY));
-        Some(Self {
+        Ok(Self {
             file: file.to_string(),
-            latitude: Self::lat_from_value(
-                &exif.get_field(Tag::GPSLatitude, In::PRIMARY)?.value,
-                lat_ref,
-            )?,
-            longitude: Self::lon_from_value(
-                &exif.get_field(Tag::GPSLongitude, In::PRIMARY)?.value,
-                lon_ref,
-            )?,
+            latitude,
+            longitude,
             altitude: Self::altitude_from_exif(exif),
             direction: exif
                 .get_field(Tag::GPSImgDirection, In::PRIMARY)

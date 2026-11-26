@@ -95,6 +95,14 @@ enum Commands {
         /// Only include images taken on or after this date (YYYY-MM-DD)
         #[arg(short, long, value_name = "DATE")]
         after: Option<String>,
+
+        /// Suppress progress and summary output on stderr
+        #[arg(short = 'q', long)]
+        quiet: bool,
+
+        /// Explain why files were skipped
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// Read image paths from STDIN and collect their geotags
@@ -120,13 +128,21 @@ enum Commands {
         /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
         thumbnails: bool,
+
+        /// Suppress progress and summary output on stderr
+        #[arg(short = 'q', long)]
+        quiet: bool,
+
+        /// Explain why files were skipped
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut fs = FileSet::default();
-    let (format, thumbnails, sort, output) = match cli.command {
+    let (format, thumbnails, sort, output, quiet) = match cli.command {
         Commands::Scan {
             dir,
             update,
@@ -136,7 +152,11 @@ fn main() -> Result<()> {
             thumbnails,
             before,
             after,
+            quiet,
+            verbose,
         } => {
+            fs.set_quiet(quiet);
+            fs.set_verbose(verbose);
             let root = match &dir {
                 Some(dir) => path_to_str(dir)?,
                 None => ".",
@@ -149,7 +169,7 @@ fn main() -> Result<()> {
                 fs.set_after(parse_date(date, "after")?);
             }
             fs.scan_tree(root)?;
-            (format, thumbnails, sort, output)
+            (format, thumbnails, sort, output, quiet)
         }
         Commands::Import {
             update,
@@ -157,10 +177,14 @@ fn main() -> Result<()> {
             format,
             sort,
             thumbnails,
+            quiet,
+            verbose,
         } => {
+            fs.set_quiet(quiet);
+            fs.set_verbose(verbose);
             load_update(&mut fs, &update)?;
             fs.import_files();
-            (format, thumbnails, sort, output)
+            (format, thumbnails, sort, output, quiet)
         }
     };
 
@@ -177,6 +201,9 @@ fn main() -> Result<()> {
         } else {
             eprintln!("Warning: --thumbnails only applies to GeoJSON/HTML output; ignoring it");
         }
+    }
+    if !quiet {
+        eprintln!("{}", fs.stats().summary());
     }
     write_output(&fs, format, output.as_deref())
 }

@@ -1,13 +1,14 @@
-use crate::file_location::{FileLocation, image_mime};
+use crate::file_location::{FileLocation, SkipReason, image_mime};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use jwalk::WalkDir;
 use jwalk::rayon::prelude::*;
 use kml::Kml;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::{collections::HashSet, fs};
 
 /// Output format for the collected locations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,9 +45,60 @@ pub struct FileSet {
     file_locations: Vec<FileLocation>,
     before: Option<NaiveDate>,
     after: Option<NaiveDate>,
+    verbose: bool,
+    quiet: bool,
+    stats: Stats,
+}
+
+/// Counters describing what a scan or import did.
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub seen: usize,
+    pub candidates: usize,
+    pub added: usize,
+    pub duplicates: usize,
+    pub skipped: HashMap<SkipReason, usize>,
+}
+
+impl Stats {
+    pub fn summary(&self) -> String {
+        let mut skipped = Vec::new();
+        for reason in [
+            SkipReason::OpenFailed,
+            SkipReason::NoExif,
+            SkipReason::MissingGpsReference,
+            SkipReason::MissingCoordinates,
+            SkipReason::InvalidCoordinates,
+        ] {
+            if let Some(count) = self.skipped.get(&reason) {
+                skipped.push(format!("{count} {}", reason.description()));
+            }
+        }
+        let skipped = if skipped.is_empty() {
+            String::new()
+        } else {
+            format!(", skipped: {}", skipped.join(", "))
+        };
+        format!(
+            "Seen {} entries, {} image candidates, added {} geotagged images ({} duplicates{skipped})",
+            self.seen, self.candidates, self.added, self.duplicates
+        )
+    }
 }
 
 impl FileSet {
+    pub fn set_verbose(&mut self, verbose: bool) {
+        self.verbose = verbose;
+    }
+
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    pub fn stats(&self) -> &Stats {
+        &self.stats
+    }
+
     pub fn set_before(&mut self, date: NaiveDate) {
         self.before = Some(date);
     }
@@ -158,6 +210,14 @@ impl FileSet {
             .try_into_iter()
             .with_context(|| format!("Failed to scan directory tree at '{}'", root.display()))?;
         for entry in entries {
+            self.stats.seen += 1;
+            if !self.quiet && self.stats.seen.is_multiple_of(2000) {
+                eprintln!(
+                    "Scanned {} entries, {} image candidates...",
+                    self.stats.seen,
+                    file_candidates.len()
+                );
+            }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
@@ -193,7 +253,8 @@ impl FileSet {
                     None
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        self.stats.seen += file_candidates.len();
         self.add_files(file_candidates, false);
     }
 
@@ -210,14 +271,20 @@ impl FileSet {
     /// `candidates_canonical` tells us the paths are already canonical (as produced by
     /// `scan_tree`), so deduplication can avoid a `canonicalize` syscall per file.
     fn add_files(&mut self, file_candidates: Vec<String>, candidates_canonical: bool) {
+        let file_candidates: Vec<String> = file_candidates
+            .into_iter()
+            .filter(|f| image_mime(Path::new(f.as_str())).is_some())
+            .collect();
+        self.stats.candidates += file_candidates.len();
+
         let mut seen: HashSet<PathBuf> = self
             .file_locations
             .par_iter()
             .map(|fl| Self::identity(&fl.file))
             .collect();
+        let offered = file_candidates.len();
         let mut candidates: Vec<(PathBuf, String)> = file_candidates
             .into_par_iter()
-            .filter(|f| image_mime(Path::new(f.as_str())).is_some())
             .map(|f| {
                 let id = if candidates_canonical {
                     PathBuf::from(f.as_str())
@@ -228,11 +295,27 @@ impl FileSet {
             })
             .collect();
         candidates.retain(|(id, _)| seen.insert(id.clone()));
+        self.stats.duplicates += offered - candidates.len();
 
-        let mut new_file_locations: Vec<FileLocation> = candidates
+        let results: Vec<(String, Result<FileLocation, SkipReason>)> = candidates
             .into_par_iter()
-            .filter_map(|(_, f)| FileLocation::from_file(&f))
+            .map(|(_, path)| {
+                let result = FileLocation::from_file(&path);
+                (path, result)
+            })
             .collect();
+        let mut new_file_locations = Vec::new();
+        for (path, result) in results {
+            match result {
+                Ok(location) => new_file_locations.push(location),
+                Err(reason) => {
+                    *self.stats.skipped.entry(reason).or_default() += 1;
+                    if self.verbose {
+                        eprintln!("Skipping '{path}': {}", reason.description());
+                    }
+                }
+            }
+        }
         if let Some(before) = self.before {
             new_file_locations
                 .retain(|fl| fl.timestamp_parsed().is_some_and(|dt| dt.date() <= before));
@@ -241,6 +324,7 @@ impl FileSet {
             new_file_locations
                 .retain(|fl| fl.timestamp_parsed().is_some_and(|dt| dt.date() >= after));
         }
+        self.stats.added += new_file_locations.len();
         self.file_locations.append(&mut new_file_locations);
     }
 
@@ -417,6 +501,9 @@ mod tests {
         );
         assert_eq!(fs.file_locations.len(), 1);
         assert_eq!(fs.file_locations[0].file, "test_files/sunrise.jpg");
+        assert_eq!(fs.stats().candidates, 2);
+        assert_eq!(fs.stats().added, 1);
+        assert_eq!(fs.stats().skipped.get(&SkipReason::OpenFailed), Some(&1));
     }
 
     #[test]
@@ -426,6 +513,7 @@ mod tests {
         // Same path offered again: must not be read/added a second time.
         fs.add_files(vec!["test_files/sunrise.jpg".to_string()], false);
         assert_eq!(fs.file_locations.len(), 1);
+        assert_eq!(fs.stats().duplicates, 1);
     }
 
     #[test]
