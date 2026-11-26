@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
-use img_coords::file_set::{FileSet, OutputFormat};
+use img_coords::file_set::{FileSet, OutputFormat, SortKey};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -32,6 +32,10 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "geojson")]
         format: OutputFormat,
 
+        /// Order of the output features
+        #[arg(short = 's', long, value_enum, default_value = "path")]
+        sort: SortKey,
+
         /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
         thumbnails: bool,
@@ -57,6 +61,10 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "geojson")]
         format: OutputFormat,
 
+        /// Order of the output features
+        #[arg(short = 's', long, value_enum, default_value = "path")]
+        sort: SortKey,
+
         /// Add base64 JPEG thumbnails (GeoJSON only)
         #[arg(short, long)]
         thumbnails: bool,
@@ -66,11 +74,12 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut fs = FileSet::default();
-    let (format, thumbnails) = match cli.command {
+    let (format, thumbnails, sort) = match cli.command {
         Commands::Scan {
             dir,
             update,
             format,
+            sort,
             thumbnails,
             before,
             after,
@@ -87,18 +96,21 @@ fn main() -> Result<()> {
                 fs.set_after(parse_date(date, "after")?);
             }
             fs.scan_tree(root)?;
-            (format, thumbnails)
+            (format, thumbnails, sort)
         }
         Commands::Import {
             update,
             format,
+            sort,
             thumbnails,
         } => {
             load_update(&mut fs, &update)?;
             fs.import_files();
-            (format, thumbnails)
+            (format, thumbnails, sort)
         }
     };
+
+    fs.sort(sort);
 
     if thumbnails {
         if format == OutputFormat::GeoJson {

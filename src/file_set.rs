@@ -19,6 +19,18 @@ pub enum OutputFormat {
     Kml,
 }
 
+/// How output features are ordered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum SortKey {
+    #[default]
+    #[value(name = "path")]
+    Path,
+    #[value(name = "time")]
+    Time,
+    #[value(name = "none")]
+    None,
+}
+
 /// Minimal view of a GeoJSON document, deserialized into typed features so we never
 /// have to round-trip each feature through a string.
 #[derive(Deserialize)]
@@ -40,6 +52,19 @@ impl FileSet {
 
     pub fn set_after(&mut self, date: NaiveDate) {
         self.after = Some(date);
+    }
+
+    /// Sorts the collected locations, making output deterministic by default.
+    pub fn sort(&mut self, key: SortKey) {
+        match key {
+            SortKey::Path => self.file_locations.sort_by(|a, b| a.file.cmp(&b.file)),
+            SortKey::Time => self.file_locations.sort_by(|a, b| {
+                a.timestamp_parsed()
+                    .cmp(&b.timestamp_parsed())
+                    .then_with(|| a.file.cmp(&b.file))
+            }),
+            SortKey::None => {}
+        }
     }
 
     pub fn load_from_file(&mut self, path: &str) -> Result<()> {
@@ -361,6 +386,33 @@ mod tests {
         fs.file_locations.push(location("test_files/sunrise.jpg"));
         fs.add_files(vec![absolute], false);
         assert_eq!(fs.file_locations.len(), 1);
+    }
+
+    #[test]
+    fn test_sort_path_time_and_none() {
+        let mut first = location("b.jpg");
+        first.timestamp = Some("2025:01:02 00:00:00".to_string());
+        let mut second = location("a.jpg");
+        second.timestamp = Some("2025:01:03 00:00:00".to_string());
+        let mut third = location("c.jpg");
+        third.timestamp = Some("2025:01:01 00:00:00".to_string());
+        let mut fs = FileSet {
+            file_locations: vec![first, second, third],
+            ..Default::default()
+        };
+
+        let files = |fs: &FileSet| -> Vec<String> {
+            fs.file_locations.iter().map(|l| l.file.clone()).collect()
+        };
+
+        fs.sort(SortKey::Path);
+        assert_eq!(files(&fs), ["a.jpg", "b.jpg", "c.jpg"]);
+
+        fs.sort(SortKey::Time);
+        assert_eq!(files(&fs), ["c.jpg", "b.jpg", "a.jpg"]);
+
+        fs.sort(SortKey::None);
+        assert_eq!(files(&fs), ["c.jpg", "b.jpg", "a.jpg"]);
     }
 
     #[test]
