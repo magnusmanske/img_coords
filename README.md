@@ -12,6 +12,7 @@ Output can be either [GeoJSON](https://geojson.org/) (default), or KML. JSON als
 Use `--thumbnails` to add `base64`-encoded thumbnails to the `GeoJSON` output.
 
 ## Installation
+[Install Rust](https://rust-lang.org/tools/install/) first, if not installed already. Then:
 ```
 cargo install img_coords
 ```
