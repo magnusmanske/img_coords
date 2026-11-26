@@ -161,6 +161,44 @@ impl FileLocation {
         serde_json::to_string(&self.geojson_feature())
     }
 
+    /// CSV row (without the trailing newline).
+    pub fn as_csv(&self) -> String {
+        let fields = [
+            self.file.clone(),
+            self.latitude.get().to_string(),
+            self.longitude.get().to_string(),
+            self.altitude.map(|v| v.to_string()).unwrap_or_default(),
+            self.direction.map(|v| v.to_string()).unwrap_or_default(),
+            self.timestamp.clone().unwrap_or_default(),
+        ];
+        fields
+            .iter()
+            .map(|field| csv_escape(field))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// GPX waypoint.
+    pub fn as_gpx(&self) -> String {
+        let mut body = format!(
+            r#"<wpt lat="{}" lon="{}">"#,
+            self.latitude.get(),
+            self.longitude.get()
+        );
+        body += &format!("<name>{}</name>", self.name_xml_escaped());
+        if let Some(altitude) = self.altitude {
+            body += &format!("<ele>{altitude}</ele>");
+        }
+        if let Some(when) = self
+            .timestamp_parsed()
+            .map(|ts| ts.format("%Y-%m-%dT%H:%M:%S").to_string())
+        {
+            body += &format!("<time>{when}</time>");
+        }
+        body += "</wpt>";
+        body
+    }
+
     fn geojson_feature(&self) -> GeoJsonFeature<'_> {
         // Altitude is the optional third coordinate element, per the GeoJSON spec.
         let mut coordinates = vec![self.longitude.get(), self.latitude.get()];
@@ -373,6 +411,15 @@ impl FileLocation {
     }
 }
 
+/// Quotes a CSV field if it contains a comma, quote, or line break.
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +572,38 @@ mod tests {
         .unwrap();
         let fl = FileLocation::from_feature(&feature).unwrap();
         assert_eq!(fl.altitude, Some(123.5));
+    }
+
+    #[test]
+    fn test_as_csv_escapes() {
+        let fl = FileLocation {
+            file: "a,b\"c.jpg".to_string(),
+            latitude: lat(1.0),
+            longitude: lon(2.0),
+            altitude: None,
+            direction: None,
+            thumbnail: None,
+            timestamp: None,
+        };
+        assert_eq!(fl.as_csv(), "\"a,b\"\"c.jpg\",1,2,,,");
+    }
+
+    #[test]
+    fn test_as_gpx() {
+        let fl = FileLocation {
+            file: "a&b.jpg".to_string(),
+            latitude: lat(1.0),
+            longitude: lon(2.0),
+            altitude: Some(3.0),
+            direction: None,
+            thumbnail: None,
+            timestamp: Some("2025:03:06 05:41:42".to_string()),
+        };
+        let gpx = fl.as_gpx();
+        assert!(gpx.contains(r#"lat="1" lon="2""#), "{gpx}");
+        assert!(gpx.contains("<name>a&amp;b.jpg</name>"), "{gpx}");
+        assert!(gpx.contains("<ele>3</ele>"), "{gpx}");
+        assert!(gpx.contains("<time>2025-03-06T05:41:42</time>"), "{gpx}");
     }
 
     #[test]

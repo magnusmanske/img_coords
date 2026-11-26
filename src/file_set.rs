@@ -17,6 +17,10 @@ pub enum OutputFormat {
     GeoJson,
     #[value(name = "kml")]
     Kml,
+    #[value(name = "csv")]
+    Csv,
+    #[value(name = "gpx")]
+    Gpx,
 }
 
 /// How output features are ordered.
@@ -272,6 +276,24 @@ impl FileSet {
                 ",\n",
                 "\n]}\n",
                 |location| Ok(location.as_geojson()?),
+            ),
+            OutputFormat::Csv => self.write_chunked(
+                &mut out,
+                "file,latitude,longitude,altitude,direction,timestamp\n",
+                "\n",
+                "",
+                |location| Ok(location.as_csv()),
+            ),
+            OutputFormat::Gpx => self.write_chunked(
+                &mut out,
+                concat!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+                    "<gpx version=\"1.1\" creator=\"img_coords\" ",
+                    "xmlns=\"http://www.topografix.com/GPX/1/1\">\n",
+                ),
+                "\n",
+                "</gpx>\n",
+                |location| Ok(location.as_gpx()),
             ),
         }
     }
