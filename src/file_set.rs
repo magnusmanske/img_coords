@@ -40,6 +40,9 @@ struct GeoJsonFeatures {
 /// Number of features rendered in parallel before writing them out.
 const OUTPUT_CHUNK: usize = 512;
 
+/// Upper bound on concurrent thumbnail decoders.
+const MAX_THUMBNAIL_THREADS: usize = 4;
+
 #[derive(Clone, Debug, Default)]
 pub struct FileSet {
     file_locations: Vec<FileLocation>,
@@ -329,10 +332,23 @@ impl FileSet {
     }
 
     pub fn generate_missing_thumbnails(&mut self) {
-        // Thumbnailing is CPU-bound (decode + re-encode per image); fan it out.
-        self.file_locations
-            .par_iter_mut()
-            .for_each(|fl| fl.generate_missing_thumbnail());
+        // Decoding images is memory-heavy, so cap the number of concurrent decoders
+        // instead of saturating every core (and the memory allocator).
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(MAX_THUMBNAIL_THREADS);
+        match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+            Ok(pool) => pool.install(|| {
+                self.file_locations
+                    .par_iter_mut()
+                    .for_each(|location| location.generate_missing_thumbnail());
+            }),
+            Err(_) => self
+                .file_locations
+                .par_iter_mut()
+                .for_each(|location| location.generate_missing_thumbnail()),
+        }
     }
 
     pub fn write_to<W: Write>(&self, mut out: W, format: OutputFormat) -> Result<()> {

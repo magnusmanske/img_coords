@@ -1,6 +1,7 @@
 use base64::{Engine, engine::general_purpose};
 use exif::{Exif, In, Tag, Value};
 use geojson::Feature;
+use image::io::Reader as ImageReader;
 use kml::Kml;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -8,7 +9,6 @@ use std::{
     io::{BufReader, Cursor},
     path::Path,
 };
-use thumbnailer::{ThumbnailSize, create_thumbnails};
 
 /// A latitude in degrees, guaranteed to be finite and within `[-90, 90]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,33 +82,16 @@ pub fn is_supported_image(path: &Path) -> bool {
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
 }
 
-/// MIME type used to decode an image extension we support. Returns `None` for files
-/// that are not one of the image formats we try to process.
-pub fn image_mime(path: &Path) -> Option<mime::Mime> {
-    let ext = path.extension()?.to_str()?;
-    let is = |name: &str| ext.eq_ignore_ascii_case(name);
-    if is("jpg") || is("jpeg") {
-        Some(mime::IMAGE_JPEG)
-    } else if is("png") {
-        Some(mime::IMAGE_PNG)
-    } else if is("gif") {
-        Some(mime::IMAGE_GIF)
-    } else if is("bmp") {
-        Some(mime::IMAGE_BMP)
-    } else if is("webp") {
-        "image/webp".parse().ok()
-    } else if is("tif") || is("tiff") {
-        "image/tiff".parse().ok()
-    } else if is("heic") {
-        "image/heic".parse().ok()
-    } else if is("heif") {
-        "image/heif".parse().ok()
-    } else if is("avif") {
-        "image/avif".parse().ok()
-    } else {
-        None
-    }
-}
+/// Longest edge of a generated thumbnail, in pixels.
+const THUMBNAIL_MAX_EDGE: u32 = 256;
+/// JPEG quality of a generated thumbnail.
+const THUMBNAIL_QUALITY: u8 = 80;
+/// Skip files above this size before attempting to decode them.
+const MAX_DECODE_BYTES: u64 = 200 * 1024 * 1024;
+/// Refuse to decode images larger than this many pixels (decompression bombs).
+const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+/// Refuse to embed thumbnails larger than this many bytes.
+const MAX_THUMBNAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
@@ -302,18 +285,42 @@ impl FileLocation {
     }
 
     fn get_thumbnail_base64(&self) -> Option<String> {
-        // The thumbnailer picks its decoder from the MIME type, so it must match the
-        // actual file format (not always JPEG).
-        let mime = image_mime(Path::new(&self.file))?;
-        let file = File::open(&self.file).ok()?;
-        let reader = BufReader::new(file);
-        let thumbnail = create_thumbnails(reader, mime, [ThumbnailSize::Medium]).ok()?;
-        let thumbnail = thumbnail.first()?.to_owned();
-        let mut buf = Cursor::new(Vec::new());
-        thumbnail.write_jpeg(&mut buf, 8).ok()?;
-        let vec = buf.into_inner();
-        let encoded: String = general_purpose::STANDARD_NO_PAD.encode(vec);
-        Some(encoded)
+        self.decode_thumbnail()
+            .map(|bytes| general_purpose::STANDARD_NO_PAD.encode(bytes))
+    }
+
+    /// Decodes the image, bounds its dimensions, and re-encodes it as a small JPEG.
+    /// Returns `None` for unsupported formats and for files that fail the size guards.
+    fn decode_thumbnail(&self) -> Option<Vec<u8>> {
+        let metadata = std::fs::metadata(&self.file).ok()?;
+        if metadata.len() > MAX_DECODE_BYTES {
+            return None;
+        }
+        // Read just the dimensions first so a decompression bomb is never decoded.
+        let (width, height) = ImageReader::new(BufReader::new(File::open(&self.file).ok()?))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()?;
+        if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+            return None;
+        }
+        let image = ImageReader::new(BufReader::new(File::open(&self.file).ok()?))
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()?;
+        let image = if image.width() > THUMBNAIL_MAX_EDGE || image.height() > THUMBNAIL_MAX_EDGE {
+            image.thumbnail(THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE)
+        } else {
+            image
+        };
+        let mut buffer = Cursor::new(Vec::new());
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, THUMBNAIL_QUALITY);
+        encoder.encode_image(&image).ok()?;
+        let bytes = buffer.into_inner();
+        (bytes.len() <= MAX_THUMBNAIL_BYTES).then_some(bytes)
     }
 
     pub fn from_kml_element(element: &Kml) -> Option<Self> {
@@ -850,27 +857,6 @@ mod tests {
             );
         }
         assert!(!is_supported_image(Path::new("a.txt")));
-    }
-
-    #[test]
-    fn test_image_mime_supports_phone_formats() {
-        for (path, expected) in [
-            ("a.JPG", "image/jpeg"),
-            ("a.jpeg", "image/jpeg"),
-            ("a.HEIC", "image/heic"),
-            ("a.heif", "image/heif"),
-            ("a.webp", "image/webp"),
-            ("a.avif", "image/avif"),
-            ("a.png", "image/png"),
-        ] {
-            assert_eq!(
-                image_mime(Path::new(path)).map(|m| m.to_string()),
-                Some(expected.to_string()),
-                "{path}"
-            );
-        }
-        assert!(image_mime(Path::new("a.txt")).is_none());
-        assert!(image_mime(Path::new("no_extension")).is_none());
     }
 
     #[test]

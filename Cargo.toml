@@ -19,8 +19,7 @@ geojson = "0.24"
 kml = "0.8"
 jwalk = "0.8"
 rayon = "1"
-thumbnailer = "0.4"
-mime = "0.3"
+image = { version = "0.24", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff", "webp"] }
 base64 = "0.21"
 
 [profile.release]
