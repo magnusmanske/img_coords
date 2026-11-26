@@ -64,6 +64,24 @@ impl<'de> Deserialize<'de> for Longitude {
     }
 }
 
+/// Image extensions we attempt to read. Includes TIFF/ISOBMFF-based RAW formats,
+/// whose EXIF blocks `kamadak-exif` can usually read.
+const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "tif", "tiff", "webp", "bmp", "heic", "heif", "avif", "dng",
+    "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "rw2", "orf", "raf", "pef", "srw", "dcr",
+    "kdc", "rwl", "raw",
+];
+
+/// Whether the extension is one we try to read coordinates from.
+pub fn is_supported_image(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    SUPPORTED_EXTENSIONS
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+}
+
 /// MIME type used to decode an image extension we support. Returns `None` for files
 /// that are not one of the image formats we try to process.
 pub fn image_mime(path: &Path) -> Option<mime::Mime> {
@@ -808,6 +826,17 @@ mod tests {
         assert!(gpx.contains("<name>a&amp;b.jpg</name>"), "{gpx}");
         assert!(gpx.contains("<ele>3</ele>"), "{gpx}");
         assert!(gpx.contains("<time>2025-03-06T05:41:42</time>"), "{gpx}");
+    }
+
+    #[test]
+    fn test_raw_extensions_supported() {
+        for extension in ["dng", "CR2", "nef", "arw", "rw2", "orf", "raf", "cr3"] {
+            assert!(
+                is_supported_image(Path::new(&format!("a.{extension}"))),
+                "{extension}"
+            );
+        }
+        assert!(!is_supported_image(Path::new("a.txt")));
     }
 
     #[test]

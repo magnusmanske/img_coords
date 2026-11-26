@@ -1,4 +1,4 @@
-use crate::file_location::{FileLocation, SkipReason, image_mime};
+use crate::file_location::{FileLocation, SkipReason, is_supported_image};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use jwalk::WalkDir;
@@ -230,7 +230,7 @@ impl FileSet {
             }
             // Check the extension on the file name first so we only build a full path for
             // actual image candidates.
-            if image_mime(Path::new(entry.file_name())).is_none() {
+            if !is_supported_image(Path::new(entry.file_name())) {
                 continue;
             }
             let path = entry.path();
@@ -273,7 +273,7 @@ impl FileSet {
     fn add_files(&mut self, file_candidates: Vec<String>, candidates_canonical: bool) {
         let file_candidates: Vec<String> = file_candidates
             .into_iter()
-            .filter(|f| image_mime(Path::new(f.as_str())).is_some())
+            .filter(|f| is_supported_image(Path::new(f.as_str())))
             .collect();
         self.stats.candidates += file_candidates.len();
 
