@@ -272,7 +272,8 @@ impl FileSet {
                     .file_locations
                     .par_iter()
                     .map(|fl| fl.as_geojson())
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("Failed to serialize GeoJSON")?;
                 writeln!(out, r#"{{"type": "FeatureCollection","features": ["#)?;
                 let mut comma = "";
                 for feature in &features {

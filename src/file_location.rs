@@ -3,7 +3,6 @@ use exif::{Exif, In, Tag, Value};
 use geojson::Feature;
 use kml::Kml;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::json;
 use std::{
     fs::File,
     io::{BufReader, Cursor},
@@ -104,6 +103,34 @@ pub struct FileLocation {
     pub timestamp: Option<String>,
 }
 
+/// Borrowed GeoJSON view of a [`FileLocation`], serialized without an intermediate
+/// `serde_json::Value` tree.
+#[derive(Serialize)]
+struct GeoJsonFeature<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    geometry: GeoJsonGeometry,
+    properties: GeoJsonProperties<'a>,
+}
+
+#[derive(Serialize)]
+struct GeoJsonGeometry {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    coordinates: Vec<f64>,
+}
+
+#[derive(Serialize)]
+struct GeoJsonProperties<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direction: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thumbnail: Option<&'a str>,
+}
+
 impl FileLocation {
     pub fn from_file(file_name: &str) -> Option<Self> {
         let file = std::fs::File::open(file_name).ok()?;
@@ -130,32 +157,29 @@ impl FileLocation {
         )
     }
 
-    pub fn as_geojson(&self) -> String {
+    pub fn as_geojson(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.geojson_feature())
+    }
+
+    fn geojson_feature(&self) -> GeoJsonFeature<'_> {
         // Altitude is the optional third coordinate element, per the GeoJSON spec.
-        let coordinates = match self.altitude {
-            Some(altitude) => json!([self.longitude.get(), self.latitude.get(), altitude]),
-            None => json!([self.longitude.get(), self.latitude.get()]),
-        };
-        let mut j = json!({
-            "type": "Feature",
-           "geometry": {
-               "type": "Point",
-               "coordinates": coordinates,
-           },
-           "properties": {
-               "name": self.file.to_owned(),
-           }
-        });
-        if let Some(direction) = self.direction {
-            j["properties"]["direction"] = json!(direction);
+        let mut coordinates = vec![self.longitude.get(), self.latitude.get()];
+        if let Some(altitude) = self.altitude {
+            coordinates.push(altitude);
         }
-        if let Some(timestamp) = &self.timestamp {
-            j["properties"]["timestamp"] = json!(timestamp);
+        GeoJsonFeature {
+            kind: "Feature",
+            geometry: GeoJsonGeometry {
+                kind: "Point",
+                coordinates,
+            },
+            properties: GeoJsonProperties {
+                name: &self.file,
+                direction: self.direction,
+                timestamp: self.timestamp.as_deref(),
+                thumbnail: self.thumbnail.as_deref(),
+            },
         }
-        if let Some(base64) = &self.thumbnail {
-            j["properties"]["thumbnail"] = json!(base64)
-        }
-        j.to_string()
     }
 
     pub fn generate_missing_thumbnail(&mut self) {
@@ -187,7 +211,7 @@ impl FileLocation {
                 file: name.to_owned(),
                 latitude: Latitude::new(point.coord.y)?,
                 longitude: Longitude::new(point.coord.x)?,
-                altitude: point.coord.z,
+                altitude: point.coord.z.filter(|value| value.is_finite()),
                 direction: None, // Not encoded in KML
                 thumbnail: None,
                 timestamp: Self::timestamp_from_kml(&pm.children),
@@ -280,7 +304,8 @@ impl FileLocation {
             altitude: Self::altitude_from_exif(exif),
             direction: exif
                 .get_field(Tag::GPSImgDirection, In::PRIMARY)
-                .and_then(|f| Self::f64_from_value(&f.value)),
+                .and_then(|f| Self::f64_from_value(&f.value))
+                .filter(|value| value.is_finite()),
             thumbnail: None,
             timestamp,
         })
@@ -293,7 +318,7 @@ impl FileLocation {
         let below_sea_level = exif
             .get_field(Tag::GPSAltitudeRef, In::PRIMARY)
             .is_some_and(|f| matches!(&f.value, Value::Byte(v) if v.first() == Some(&1)));
-        Some(if below_sea_level { -altitude } else { altitude })
+        Some(if below_sea_level { -altitude } else { altitude }).filter(|value| value.is_finite())
     }
 
     fn string_from_value(f: Option<&exif::Field>) -> Option<String> {
@@ -591,8 +616,8 @@ mod tests {
             thumbnail: Some("base64".to_string()),
             timestamp: Some("2025:03:06 05:41:42".to_string()),
         };
-        let geojson = fl.as_geojson();
-        let expected = r#"{"geometry":{"coordinates":[12.345,45.6789,46.79],"type":"Point"},"properties":{"direction":11.0,"name":"test_files/sunrise.jpg","thumbnail":"base64","timestamp":"2025:03:06 05:41:42"},"type":"Feature"}"#;
+        let geojson = fl.as_geojson().unwrap();
+        let expected = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[12.345,45.6789,46.79]},"properties":{"name":"test_files/sunrise.jpg","direction":11.0,"timestamp":"2025:03:06 05:41:42","thumbnail":"base64"}}"#;
         assert_eq!(geojson, expected);
     }
 
@@ -609,7 +634,7 @@ mod tests {
             thumbnail: Some("base64data".to_string()),
             timestamp: Some("2025:03:06 05:41:42".to_string()),
         };
-        let v: serde_json::Value = serde_json::from_str(&fl.as_geojson()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fl.as_geojson().unwrap()).unwrap();
         let back = FileLocation::from_geojson_feature(&v).unwrap();
         assert_eq!(back.file, fl.file);
         assert_eq!(back.latitude, fl.latitude);
@@ -634,7 +659,7 @@ mod tests {
             thumbnail: None,
             timestamp: None,
         };
-        let v: serde_json::Value = serde_json::from_str(&fl.as_geojson()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fl.as_geojson().unwrap()).unwrap();
         let back = FileLocation::from_geojson_feature(&v)
             .expect("a location without altitude/direction must still round-trip");
         assert_eq!(back.file, fl.file);
