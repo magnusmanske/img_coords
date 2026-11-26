@@ -98,7 +98,8 @@ pub struct FileLocation {
     pub latitude: Latitude,
     pub longitude: Longitude,
     pub altitude: Option<f64>, // negative when below sea level (from GPSAltitudeRef)
-    pub direction: Option<f64>, // GPSImgDirection; magnetic vs. true north is not tracked
+    pub direction: Option<f64>, // GPSImgDirection
+    pub direction_ref: Option<DirectionRef>, // true or magnetic north
     pub thumbnail: Option<String>,
     pub timestamp: Option<String>,
     /// UTC offset of `timestamp`, e.g. `+01:00`, when known.
@@ -128,11 +129,39 @@ struct GeoJsonProperties<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     direction: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    direction_ref: Option<DirectionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     utc_offset: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thumbnail: Option<&'a str>,
+}
+
+/// Reference frame for `GPSImgDirection`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DirectionRef {
+    True,
+    Magnetic,
+}
+
+impl DirectionRef {
+    fn from_char(value: char) -> Option<Self> {
+        match value.to_ascii_uppercase() {
+            'T' => Some(Self::True),
+            'M' => Some(Self::Magnetic),
+            _ => None,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "true" => Some(Self::True),
+            "magnetic" => Some(Self::Magnetic),
+            _ => None,
+        }
+    }
 }
 
 /// Why a candidate file did not produce a location.
@@ -240,6 +269,7 @@ impl FileLocation {
             properties: GeoJsonProperties {
                 name: &self.file,
                 direction: self.direction,
+                direction_ref: self.direction_ref,
                 timestamp: self.timestamp.as_deref(),
                 utc_offset: self.utc_offset.as_deref(),
                 thumbnail: self.thumbnail.as_deref(),
@@ -279,6 +309,7 @@ impl FileLocation {
                 longitude: Longitude::new(point.coord.x)?,
                 altitude: point.coord.z.filter(|value| value.is_finite()),
                 direction: None, // Not encoded in KML
+                direction_ref: None,
                 thumbnail: None,
                 timestamp,
                 utc_offset,
@@ -330,6 +361,9 @@ impl FileLocation {
                 .copied()
                 .or_else(|| property("altitude").and_then(serde_json::Value::as_f64)),
             direction: property("direction").and_then(serde_json::Value::as_f64),
+            direction_ref: property("direction_ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(DirectionRef::parse),
             thumbnail: property("thumbnail")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
@@ -394,6 +428,10 @@ impl FileLocation {
                 .get_field(Tag::GPSImgDirection, In::PRIMARY)
                 .and_then(|f| Self::f64_from_value(&f.value))
                 .filter(|value| value.is_finite()),
+            direction_ref: exif
+                .get_field(Tag::GPSImgDirectionRef, In::PRIMARY)
+                .and_then(|f| Self::letter_from_value(&f.value))
+                .and_then(DirectionRef::from_char),
             thumbnail: None,
             timestamp,
             utc_offset,
@@ -618,6 +656,21 @@ mod tests {
     }
 
     #[test]
+    fn test_direction_reference() {
+        let exif = exif_with_fields(vec![
+            primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"N".to_vec()])),
+            primary(Tag::GPSLongitudeRef, Value::Ascii(vec![b"E".to_vec()])),
+            primary(Tag::GPSLatitude, rationals(&[(45, 1), (0, 1), (0, 1)])),
+            primary(Tag::GPSLongitude, rationals(&[(12, 1), (0, 1), (0, 1)])),
+            primary(Tag::GPSImgDirection, rationals(&[(90, 1)])),
+            primary(Tag::GPSImgDirectionRef, Value::Ascii(vec![b"M".to_vec()])),
+        ]);
+        let fl = FileLocation::from_exif("x.jpg", &exif).unwrap();
+        assert_eq!(fl.direction, Some(90.0));
+        assert_eq!(fl.direction_ref, Some(DirectionRef::Magnetic));
+    }
+
+    #[test]
     fn test_offset_time_original() {
         let exif = exif_with_fields(vec![
             primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"N".to_vec()])),
@@ -729,6 +782,7 @@ mod tests {
             longitude: lon(2.0),
             altitude: None,
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: None,
             utc_offset: None,
@@ -744,6 +798,7 @@ mod tests {
             longitude: lon(2.0),
             altitude: Some(3.0),
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: None,
@@ -807,6 +862,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: Some(46.79),
             direction: Some(11.0),
+            direction_ref: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: None,
@@ -826,6 +882,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: None,
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: None,
             utc_offset: None,
@@ -849,6 +906,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: Some(46.79),
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: None,
@@ -866,6 +924,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: Some(46.79),
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: Some("+01:00".to_string()),
@@ -888,6 +947,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: Some(46.79),
             direction: Some(11.0),
+            direction_ref: None,
             thumbnail: Some("base64".to_string()),
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: None,
@@ -907,6 +967,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: Some(46.79),
             direction: Some(11.0),
+            direction_ref: Some(DirectionRef::Magnetic),
             thumbnail: Some("base64data".to_string()),
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: Some("+01:00".to_string()),
@@ -934,6 +995,7 @@ mod tests {
             longitude: lon(12.345),
             altitude: None,
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: None,
             utc_offset: None,
@@ -978,6 +1040,7 @@ mod tests {
             longitude: lon(0.0),
             altitude: None,
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: Some("2025:03:06 05:41:42".to_string()),
             utc_offset: None,
@@ -1002,6 +1065,7 @@ mod tests {
             longitude: lon(2.0),
             altitude: None,
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: None,
             utc_offset: None,

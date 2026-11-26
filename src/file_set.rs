@@ -462,6 +462,7 @@ mod tests {
             longitude: crate::file_location::Longitude::new(0.0).unwrap(),
             altitude: None,
             direction: None,
+            direction_ref: None,
             thumbnail: None,
             timestamp: None,
             utc_offset: None,
