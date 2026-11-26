@@ -93,6 +93,8 @@ const MAX_DECODE_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 /// Refuse to embed thumbnails larger than this many bytes.
 const MAX_THUMBNAIL_BYTES: usize = 64 * 1024;
+/// Refuse to use an embedded EXIF thumbnail larger than this many bytes.
+const MAX_EMBEDDED_THUMBNAIL_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
@@ -290,28 +292,23 @@ impl FileLocation {
             .map(|bytes| general_purpose::STANDARD_NO_PAD.encode(bytes))
     }
 
-    /// Decodes the image, bounds its dimensions, and re-encodes it as a small JPEG.
-    /// Returns `None` for unsupported formats and for files that fail the size guards.
+    /// Produces a small JPEG thumbnail, preferring the embedded EXIF thumbnail when it
+    /// is usable. Returns `None` for unsupported formats and files failing the guards.
     fn decode_thumbnail(&self) -> Option<Vec<u8>> {
-        let metadata = std::fs::metadata(&self.file).ok()?;
-        if metadata.len() > MAX_DECODE_BYTES {
-            return None;
-        }
-        // Read just the dimensions first so a decompression bomb is never decoded.
-        let (width, height) = ImageReader::new(BufReader::new(File::open(&self.file).ok()?))
-            .with_guessed_format()
-            .ok()?
-            .into_dimensions()
-            .ok()?;
-        if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
-            return None;
-        }
-        let image = ImageReader::new(BufReader::new(File::open(&self.file).ok()?))
-            .with_guessed_format()
-            .ok()?
-            .decode()
-            .ok()?;
-        let image = apply_orientation(image, self.exif_orientation());
+        let exif = self.read_exif();
+        let orientation = exif.as_ref().map_or(1, Self::orientation_from_exif);
+        let image = exif
+            .as_ref()
+            .and_then(Self::embedded_thumbnail)
+            .and_then(|bytes| {
+                ImageReader::new(Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()?
+                    .decode()
+                    .ok()
+            })
+            .or_else(|| self.decode_full_image())?;
+        let image = apply_orientation(image, orientation);
         let image = if image.width() > THUMBNAIL_MAX_EDGE || image.height() > THUMBNAIL_MAX_EDGE {
             image.thumbnail(THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE)
         } else {
@@ -325,15 +322,15 @@ impl FileLocation {
         (bytes.len() <= MAX_THUMBNAIL_BYTES).then_some(bytes)
     }
 
+    fn read_exif(&self) -> Option<Exif> {
+        let file = File::open(&self.file).ok()?;
+        exif::Reader::new()
+            .read_from_container(&mut BufReader::new(&file))
+            .ok()
+    }
+
     /// Reads the EXIF orientation (1-8), defaulting to 1 (upright).
-    fn exif_orientation(&self) -> u16 {
-        let Some(exif) = File::open(&self.file).ok().and_then(|file| {
-            exif::Reader::new()
-                .read_from_container(&mut BufReader::new(&file))
-                .ok()
-        }) else {
-            return 1;
-        };
+    fn orientation_from_exif(exif: &Exif) -> u16 {
         match exif
             .get_field(Tag::Orientation, In::PRIMARY)
             .map(|f| &f.value)
@@ -341,6 +338,56 @@ impl FileLocation {
             Some(Value::Short(values)) => values.first().copied().unwrap_or(1),
             _ => 1,
         }
+    }
+
+    /// Extracts the camera-embedded JPEG thumbnail, if it is present and not absurdly large.
+    fn embedded_thumbnail(exif: &Exif) -> Option<Vec<u8>> {
+        let offset = Self::u32_from_value(
+            &exif
+                .get_field(Tag::JPEGInterchangeFormat, In::THUMBNAIL)?
+                .value,
+        )? as usize;
+        let length = Self::u32_from_value(
+            &exif
+                .get_field(Tag::JPEGInterchangeFormatLength, In::THUMBNAIL)?
+                .value,
+        )? as usize;
+        if length == 0 || length > MAX_EMBEDDED_THUMBNAIL_BYTES {
+            return None;
+        }
+        let end = offset.checked_add(length)?;
+        exif.buf().get(offset..end).map(<[u8]>::to_vec)
+    }
+
+    fn u32_from_value(value: &Value) -> Option<u32> {
+        match value {
+            Value::Long(values) => values.first().copied(),
+            Value::Short(values) => values.first().map(|&v| u32::from(v)),
+            Value::Byte(values) => values.first().map(|&v| u32::from(v)),
+            _ => None,
+        }
+    }
+
+    /// Decodes the full image after bounding its file size and pixel dimensions.
+    fn decode_full_image(&self) -> Option<DynamicImage> {
+        let metadata = std::fs::metadata(&self.file).ok()?;
+        if metadata.len() > MAX_DECODE_BYTES {
+            return None;
+        }
+        // Read just the dimensions first so a decompression bomb is never decoded.
+        let (width, height) = ImageReader::new(BufReader::new(File::open(&self.file).ok()?))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()?;
+        if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+            return None;
+        }
+        ImageReader::new(BufReader::new(File::open(&self.file).ok()?))
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()
     }
 
     pub fn from_kml_element(element: &Kml) -> Option<Self> {
@@ -880,6 +927,28 @@ mod tests {
         assert!(gpx.contains("<name>a&amp;b.jpg</name>"), "{gpx}");
         assert!(gpx.contains("<ele>3</ele>"), "{gpx}");
         assert!(gpx.contains("<time>2025-03-06T05:41:42</time>"), "{gpx}");
+    }
+
+    #[test]
+    fn test_embedded_thumbnail_extraction() {
+        let fl = FileLocation::from_file("test_files/sunrise.jpg").unwrap();
+        let exif = fl.read_exif().expect("fixture has EXIF");
+        if let Some(bytes) = FileLocation::embedded_thumbnail(&exif) {
+            assert_eq!(&bytes[..2], &[0xFF, 0xD8], "embedded thumbnail is a JPEG");
+        }
+    }
+
+    #[test]
+    fn test_generated_thumbnail_is_bounded() {
+        let mut fl = FileLocation::from_file("test_files/sunrise.jpg").unwrap();
+        fl.generate_missing_thumbnail();
+        let thumbnail = fl.thumbnail.expect("a JPEG thumbnail should be generated");
+        let max_base64 = MAX_THUMBNAIL_BYTES.div_ceil(3) * 4;
+        assert!(
+            thumbnail.len() <= max_base64,
+            "thumbnail was {} bytes",
+            thumbnail.len()
+        );
     }
 
     #[test]
