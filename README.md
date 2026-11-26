@@ -29,36 +29,33 @@ cargo uninstall img_coords
 ```
 
 ## Example
-Write GeoJSON, with thumbnails, to STDOUT:
+Write GeoJSON, with thumbnails:
 ```
-img_coords scan --dir SOME_ROOT_DIRECTORY --thumbnails
+img_coords scan --dir SOME_ROOT_DIRECTORY --thumbnails > images.json
 ```
 
-Write a KML file to STDOUT:
+Write a KML file:
 ```
-img_coords scan --dir SOME_ROOT_DIRECTORY --format kml
+img_coords scan --dir SOME_ROOT_DIRECTORY --format kml  > images.kml
 ```
 
 Use a previously generated GeoJSON/KML file and only add files not in there:
 ```
-img_coords scan --dir SOME_ROOT_DIRECTORY --update EXISTING.kml
+img_coords scan --dir SOME_ROOT_DIRECTORY --update images.kml
 ```
 
 Limit the result to a date range (both bounds are inclusive, `YYYY-MM-DD`):
 ```
-img_coords scan --dir SOME_ROOT_DIRECTORY --after 2024-01-01 --before 2024-12-31
+img_coords scan --dir SOME_ROOT_DIRECTORY --after 2024-01-01 --before 2024-12-31 > images.json
 ```
 
-Import a list of file paths from STDIN instead of walking a directory:
+Import a list of file paths from STDIN instead of walking a directory (e.g. via `find`):
 ```
-find SOME_ROOT_DIRECTORY | img_coords import --format kml
+find SOME_ROOT_DIRECTORY | img_coords import --format kml > images.kml
 ```
 
-`--thumbnails` applies to GeoJSON only; KML has no thumbnail support, so the
-flag is ignored (with a warning) when combined with `--format kml`.
+`--thumbnails` applies to GeoJSON only; KML has no thumbnail support, so the flag is ignored (with a warning) when combined with `--format kml`.
 
-`scan` walks the tree in parallel and is typically the fastest option. `import`
-is useful when you already have a list of paths, or want to combine it with
-another tool; it does not walk the filesystem itself.
+`scan` walks the tree in parallel and is typically the fastest option. `import` is useful when you already have a list of paths, or want to combine it with another tool; it does not walk the filesystem itself.
 
 Run `img_coords` or `img_coords <COMMAND> --help` to get help.
