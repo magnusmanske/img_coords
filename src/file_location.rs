@@ -1,6 +1,7 @@
 use base64::{Engine, engine::general_purpose};
 use exif::{Exif, In, Tag, Value};
 use geojson::Feature;
+use image::DynamicImage;
 use image::io::Reader as ImageReader;
 use kml::Kml;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -310,6 +311,7 @@ impl FileLocation {
             .ok()?
             .decode()
             .ok()?;
+        let image = apply_orientation(image, self.exif_orientation());
         let image = if image.width() > THUMBNAIL_MAX_EDGE || image.height() > THUMBNAIL_MAX_EDGE {
             image.thumbnail(THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE)
         } else {
@@ -321,6 +323,24 @@ impl FileLocation {
         encoder.encode_image(&image).ok()?;
         let bytes = buffer.into_inner();
         (bytes.len() <= MAX_THUMBNAIL_BYTES).then_some(bytes)
+    }
+
+    /// Reads the EXIF orientation (1-8), defaulting to 1 (upright).
+    fn exif_orientation(&self) -> u16 {
+        let Some(exif) = File::open(&self.file).ok().and_then(|file| {
+            exif::Reader::new()
+                .read_from_container(&mut BufReader::new(&file))
+                .ok()
+        }) else {
+            return 1;
+        };
+        match exif
+            .get_field(Tag::Orientation, In::PRIMARY)
+            .map(|f| &f.value)
+        {
+            Some(Value::Short(values)) => values.first().copied().unwrap_or(1),
+            _ => 1,
+        }
     }
 
     pub fn from_kml_element(element: &Kml) -> Option<Self> {
@@ -575,6 +595,20 @@ impl FileLocation {
             _ => return None,
         }
         value.is_finite().then_some(value)
+    }
+}
+
+/// Applies an EXIF orientation (1-8) to an image.
+fn apply_orientation(image: DynamicImage, orientation: u16) -> DynamicImage {
+    match orientation {
+        2 => image.fliph(),
+        3 => image.rotate180(),
+        4 => image.flipv(),
+        5 => image.rotate90().fliph(),
+        6 => image.rotate90(),
+        7 => image.rotate270().fliph(),
+        8 => image.rotate270(),
+        _ => image,
     }
 }
 
@@ -846,6 +880,15 @@ mod tests {
         assert!(gpx.contains("<name>a&amp;b.jpg</name>"), "{gpx}");
         assert!(gpx.contains("<ele>3</ele>"), "{gpx}");
         assert!(gpx.contains("<time>2025-03-06T05:41:42</time>"), "{gpx}");
+    }
+
+    #[test]
+    fn test_apply_orientation_swaps_dimensions() {
+        let image = DynamicImage::new_rgb8(2, 3);
+        assert_eq!(apply_orientation(image.clone(), 3).width(), 2);
+        assert_eq!(apply_orientation(image.clone(), 6).width(), 3);
+        assert_eq!(apply_orientation(image.clone(), 6).height(), 2);
+        assert_eq!(apply_orientation(image, 8).width(), 3);
     }
 
     #[test]
