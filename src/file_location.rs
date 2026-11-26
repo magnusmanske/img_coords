@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 use exif::{Exif, In, Tag, Value};
 use geojson::GeoJson;
 use kml::Kml;
@@ -8,7 +8,7 @@ use std::{
     fs::File,
     io::{BufReader, Cursor},
 };
-use thumbnailer::{create_thumbnails, ThumbnailSize};
+use thumbnailer::{ThumbnailSize, create_thumbnails};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileLocation {
@@ -32,13 +32,14 @@ impl FileLocation {
 
     pub fn as_kml(&self) -> String {
         let mut other = String::new();
-        if let Some(timestamp) = &self.timestamp {
-            other += &format!(
-                "<TimeStamp><when>{}</when></TimeStamp>",
-                timestamp.replace(' ', "T")
-            );
+        if let Some(when) = self
+            .timestamp_parsed()
+            .map(|ts| ts.format("%Y-%m-%dT%H:%M:%S").to_string())
+        {
+            other += &format!("<TimeStamp><when>{when}</when></TimeStamp>");
         }
-        format!("<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point>{other}</Placemark>",
+        format!(
+            "<Placemark><name>{}</name><Point><coordinates>{},{},{}</coordinates></Point>{other}</Placemark>",
             self.name_xml_escaped(),
             self.longitude,
             self.latitude,
@@ -102,10 +103,26 @@ impl FileLocation {
                 altitude: point.coord.z,
                 direction: None, // Not encoded in KML
                 thumbnail: None,
-                timestamp: None,
+                timestamp: Self::timestamp_from_kml(&pm.children),
             });
         }
         None
+    }
+
+    /// Reads back the `<TimeStamp><when>` written by `as_kml`, converting the ISO 8601
+    /// value to the EXIF-style timestamp format used internally.
+    fn timestamp_from_kml(children: &[kml::types::Element]) -> Option<String> {
+        let when = children
+            .iter()
+            .find(|e| e.name == "TimeStamp")?
+            .children
+            .iter()
+            .find(|e| e.name == "when")?
+            .content
+            .as_deref()?;
+        chrono::NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M:%S")
+            .ok()
+            .map(|dt| dt.format("%Y:%m:%d %H:%M:%S").to_string())
     }
 
     pub fn from_geojson_feature(v: &serde_json::Value) -> Option<Self> {
@@ -170,13 +187,23 @@ impl FileLocation {
                 &exif.get_field(Tag::GPSLongitude, In::PRIMARY)?.value,
                 lon_ref,
             )?,
-            altitude: Self::f64_from_value(&exif.get_field(Tag::GPSAltitude, In::PRIMARY)?.value),
-            direction: Self::f64_from_value(
-                &exif.get_field(Tag::GPSImgDirection, In::PRIMARY)?.value,
-            ),
+            altitude: Self::altitude_from_exif(exif),
+            direction: exif
+                .get_field(Tag::GPSImgDirection, In::PRIMARY)
+                .and_then(|f| Self::f64_from_value(&f.value)),
             thumbnail: None,
             timestamp,
         })
+    }
+
+    /// Reads GPS altitude, applying the sign from `GPSAltitudeRef` (0 = above, 1 = below
+    /// sea level). The tag is absent on many images and defaults to above sea level.
+    fn altitude_from_exif(exif: &Exif) -> Option<f64> {
+        let altitude = Self::f64_from_value(&exif.get_field(Tag::GPSAltitude, In::PRIMARY)?.value)?;
+        let below_sea_level = exif
+            .get_field(Tag::GPSAltitudeRef, In::PRIMARY)
+            .is_some_and(|f| matches!(&f.value, Value::Byte(v) if v.first() == Some(&1)));
+        Some(if below_sea_level { -altitude } else { altitude })
     }
 
     fn string_from_value(f: Option<&exif::Field>) -> Option<String> {
@@ -243,6 +270,71 @@ mod tests {
         assert_eq!(fl.timestamp, Some("2025:03:06 05:41:42".to_string()));
     }
 
+    fn exif_with_fields(fields: Vec<exif::Field>) -> Exif {
+        let mut writer = exif::experimental::Writer::new();
+        for field in &fields {
+            writer.push_field(field);
+        }
+        let mut buf = Cursor::new(Vec::new());
+        writer.write(&mut buf, false).unwrap();
+        exif::Reader::new().read_raw(buf.into_inner()).unwrap()
+    }
+
+    fn primary(tag: Tag, value: Value) -> exif::Field {
+        exif::Field {
+            tag,
+            ifd_num: In::PRIMARY,
+            value,
+        }
+    }
+
+    fn rationals(values: &[(u32, u32)]) -> Value {
+        Value::Rational(
+            values
+                .iter()
+                .map(|&(num, denom)| exif::Rational { num, denom })
+                .collect(),
+        )
+    }
+
+    /// Many images have GPS coordinates but no altitude or camera direction. Those
+    /// optional tags must not cause the whole image to be dropped.
+    #[test]
+    fn test_from_exif_without_altitude_or_direction() {
+        let exif = exif_with_fields(vec![
+            primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"N".to_vec()])),
+            primary(Tag::GPSLongitudeRef, Value::Ascii(vec![b"E".to_vec()])),
+            primary(Tag::GPSLatitude, rationals(&[(45, 1), (30, 1), (0, 1)])),
+            primary(Tag::GPSLongitude, rationals(&[(12, 1), (0, 1), (0, 1)])),
+            primary(
+                Tag::DateTimeOriginal,
+                Value::Ascii(vec![b"2025:03:06 05:41:42".to_vec()]),
+            ),
+        ]);
+        let fl = FileLocation::from_exif("x.jpg", &exif)
+            .expect("missing altitude/direction must not drop the image");
+        assert_eq!(fl.altitude, None);
+        assert_eq!(fl.direction, None);
+        assert!((fl.latitude - 45.5).abs() < 1e-9);
+        assert!((fl.longitude - 12.0).abs() < 1e-9);
+        assert_eq!(fl.timestamp.as_deref(), Some("2025:03:06 05:41:42"));
+    }
+
+    /// `GPSAltitudeRef == 1` means below sea level, so the altitude must be negated.
+    #[test]
+    fn test_negative_altitude() {
+        let exif = exif_with_fields(vec![
+            primary(Tag::GPSLatitudeRef, Value::Ascii(vec![b"N".to_vec()])),
+            primary(Tag::GPSLongitudeRef, Value::Ascii(vec![b"E".to_vec()])),
+            primary(Tag::GPSLatitude, rationals(&[(45, 1), (0, 1), (0, 1)])),
+            primary(Tag::GPSLongitude, rationals(&[(12, 1), (0, 1), (0, 1)])),
+            primary(Tag::GPSAltitude, rationals(&[(100, 5)])), // 20 m
+            primary(Tag::GPSAltitudeRef, Value::Byte(vec![1])),
+        ]);
+        let fl = FileLocation::from_exif("x.jpg", &exif).unwrap();
+        assert_eq!(fl.altitude, Some(-20.0));
+    }
+
     #[test]
     fn test_from_geojson_feature() {
         let v = serde_json::json!({
@@ -304,7 +396,26 @@ mod tests {
             timestamp: Some("2025:03:06 05:41:42".to_string()),
         };
         let kml = fl.as_kml();
-        assert_eq!(kml, "<Placemark><name>test_files/sunrise.jpg</name><Point><coordinates>12.345,45.6789,46.79</coordinates></Point><TimeStamp><when>2025:03:06T05:41:42</when></TimeStamp></Placemark>");
+        assert_eq!(
+            kml,
+            "<Placemark><name>test_files/sunrise.jpg</name><Point><coordinates>12.345,45.6789,46.79</coordinates></Point><TimeStamp><when>2025-03-06T05:41:42</when></TimeStamp></Placemark>"
+        );
+    }
+
+    #[test]
+    fn test_kml_timestamp_roundtrip() {
+        let fl = FileLocation {
+            file: "test_files/sunrise.jpg".to_string(),
+            latitude: 45.6789,
+            longitude: 12.345,
+            altitude: Some(46.79),
+            direction: None,
+            thumbnail: None,
+            timestamp: Some("2025:03:06 05:41:42".to_string()),
+        };
+        let kml = Kml::from_str(&fl.as_kml()).unwrap();
+        let back = FileLocation::from_kml_element(&kml).unwrap();
+        assert_eq!(back.timestamp, fl.timestamp);
     }
 
     #[test]
@@ -430,7 +541,13 @@ mod tests {
         let kml = fl.as_kml();
         assert!(kml.contains("<name>a &amp; b &lt;tag&gt; &quot;q&quot; &apos;x&apos;.jpg</name>"));
         // The escaped name must not reintroduce raw markup characters.
-        let name_part = kml.split("<name>").nth(1).unwrap().split("</name>").next().unwrap();
+        let name_part = kml
+            .split("<name>")
+            .nth(1)
+            .unwrap()
+            .split("</name>")
+            .next()
+            .unwrap();
         assert!(!name_part.contains('<'));
         assert!(!name_part.contains('>'));
     }

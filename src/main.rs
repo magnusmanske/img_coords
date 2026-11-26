@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 use img_coords::file_set::FileSet;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 #[command(arg_required_else_help = true)]
 #[command(name = "ImageCoordinates")]
 #[command(author = "Magnus Manske <magnusmanske@gmail.com>")]
-#[command(version = "0.1.4")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Scans a directory tree for image files with EXIF coordinates and returns a data file", long_about = None)]
 struct Cli {
     // /// Turn debugging information on
@@ -120,12 +120,10 @@ fn load_update(fs: &mut FileSet, update: &Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn parse_date(date: &str, which: &str) -> Result<NaiveDateTime> {
+fn parse_date(date: &str, which: &str) -> Result<NaiveDate> {
     const DATE_FORMAT: &str = "%Y-%m-%d";
     NaiveDate::parse_from_str(date, DATE_FORMAT)
-        .with_context(|| format!("Invalid --{which} date '{date}', expected YYYY-MM-DD"))?
-        .and_hms_opt(0, 0, 0)
-        .with_context(|| format!("Invalid --{which} date '{date}'"))
+        .with_context(|| format!("Invalid --{which} date '{date}', expected YYYY-MM-DD"))
 }
 
 fn path_to_str(path: &Path) -> Result<&str> {

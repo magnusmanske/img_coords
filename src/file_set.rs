@@ -1,12 +1,12 @@
 use crate::file_location::FileLocation;
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::NaiveDateTime;
+use chrono::NaiveDate;
 use jwalk::WalkDir;
 use jwalk::rayon::prelude::*;
 use kml::Kml;
 use regex::{Regex, RegexBuilder};
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::{collections::HashSet, fs};
 
@@ -20,16 +20,16 @@ static RE_VALID_FILE_TYPE: LazyLock<Regex> = LazyLock::new(|| {
 #[derive(Clone, Debug, Default)]
 pub struct FileSet {
     file_locations: Vec<FileLocation>,
-    before: Option<NaiveDateTime>,
-    after: Option<NaiveDateTime>,
+    before: Option<NaiveDate>,
+    after: Option<NaiveDate>,
 }
 
 impl FileSet {
-    pub fn set_before(&mut self, date: NaiveDateTime) {
+    pub fn set_before(&mut self, date: NaiveDate) {
         self.before = Some(date);
     }
 
-    pub fn set_after(&mut self, date: NaiveDateTime) {
+    pub fn set_after(&mut self, date: NaiveDate) {
         self.after = Some(date);
     }
 
@@ -113,7 +113,7 @@ impl FileSet {
         // the raw paths first, then fan out the expensive per-file work (extension
         // filtering + `canonicalize` syscall) across the rayon thread pool. Filtering
         // by extension *before* canonicalizing avoids a syscall for every non-image.
-        let paths: Vec<std::path::PathBuf> = WalkDir::new(root)
+        let paths: Vec<PathBuf> = WalkDir::new(root)
             // .follow_links(true)
             .try_into_iter()
             .with_context(|| format!("Failed to scan directory tree at '{root}'"))?
@@ -145,29 +145,42 @@ impl FileSet {
         self.add_files(file_candidates);
     }
 
+    /// Filesystem identity of an entry, used for deduplication. `scan` stores canonical
+    /// paths while `import` keeps paths as written, so compare on the canonical path and
+    /// fall back to the raw path for files that no longer exist.
+    fn identity(path: &str) -> PathBuf {
+        Path::new(path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(path))
+    }
+
     fn add_files(&mut self, file_candidates: Vec<String>) {
-        let existing: HashSet<String> = self
+        // Deduplicate against existing entries and within the batch itself, so the same
+        // image reached via different spellings (relative vs. absolute, scan vs. import)
+        // or listed twice is only added once. The original spelling is preserved.
+        let mut seen: HashSet<PathBuf> = self
             .file_locations
             .par_iter()
-            .map(|fl| fl.file.to_owned())
+            .map(|fl| Self::identity(&fl.file))
             .collect();
-        let mut new_file_locations: Vec<FileLocation> = file_candidates
-            .par_iter()
-            .filter(|f| !existing.contains(*f)) // Not already in set
+        let mut candidates: Vec<(PathBuf, String)> = file_candidates
+            .into_par_iter()
             .filter(|f| RE_VALID_FILE_TYPE.is_match(f)) // Wrong file ending
-            .filter_map(|f| FileLocation::from_file(f))
+            .map(|f| (Self::identity(&f), f))
+            .collect();
+        candidates.retain(|(id, _)| seen.insert(id.clone()));
+
+        let mut new_file_locations: Vec<FileLocation> = candidates
+            .into_par_iter()
+            .filter_map(|(_, f)| FileLocation::from_file(&f))
             .collect();
         if let Some(before) = self.before {
-            new_file_locations.retain(|fl| match fl.timestamp_parsed() {
-                Some(parsed) => parsed <= before,
-                None => false,
-            });
+            new_file_locations
+                .retain(|fl| fl.timestamp_parsed().is_some_and(|dt| dt.date() <= before));
         }
         if let Some(after) = self.after {
-            new_file_locations.retain(|fl| match fl.timestamp_parsed() {
-                Some(date) => date >= after,
-                None => false,
-            });
+            new_file_locations
+                .retain(|fl| fl.timestamp_parsed().is_some_and(|dt| dt.date() >= after));
         }
         self.file_locations.append(&mut new_file_locations);
     }
@@ -179,7 +192,7 @@ impl FileSet {
             .for_each(|fl| fl.generate_missing_thumbnail());
     }
 
-    pub fn output(&mut self, format: &Option<String>) -> Result<()> {
+    pub fn output(&self, format: &Option<String>) -> Result<()> {
         // Lock stdout once and wrap it in a BufWriter: a `println!` per feature would
         // otherwise re-acquire the lock and flush on every line. The per-feature
         // serialization is built in parallel first, since it dominates for large sets.
@@ -234,11 +247,8 @@ mod tests {
     use crate::file_location::FileLocation;
     use chrono::NaiveDate;
 
-    fn at_midnight(y: i32, m: u32, d: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
     fn location(file: &str) -> FileLocation {
@@ -296,9 +306,35 @@ mod tests {
     }
 
     #[test]
+    fn test_add_files_dedups_within_batch() {
+        let mut fs = FileSet::default();
+        // The same file listed twice (e.g. duplicated `find` output) is added once.
+        fs.add_files(vec![
+            "test_files/sunrise.jpg".to_string(),
+            "test_files/sunrise.jpg".to_string(),
+        ]);
+        assert_eq!(fs.file_locations.len(), 1);
+    }
+
+    #[test]
+    fn test_add_files_dedups_relative_and_absolute_spelling() {
+        // `import` keeps relative paths while `scan` stores canonical absolute paths;
+        // both spellings of the same file must be recognized as one entry.
+        let absolute = std::fs::canonicalize("test_files/sunrise.jpg")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let mut fs = FileSet::default();
+        fs.file_locations.push(location("test_files/sunrise.jpg"));
+        fs.add_files(vec![absolute]);
+        assert_eq!(fs.file_locations.len(), 1);
+    }
+
+    #[test]
     fn test_before_after_filtering() {
         // sunrise.jpg has EXIF timestamp 2025:03:06.
-        let scan = |before: Option<NaiveDateTime>, after: Option<NaiveDateTime>| {
+        let scan = |before: Option<NaiveDate>, after: Option<NaiveDate>| {
             let mut fs = FileSet {
                 before,
                 after,
@@ -310,24 +346,36 @@ mod tests {
 
         assert_eq!(scan(None, None), 1, "no bounds keeps the image");
         assert_eq!(
-            scan(None, Some(at_midnight(2020, 1, 1))),
+            scan(None, Some(date(2020, 1, 1))),
             1,
             "after an earlier date keeps it"
         );
         assert_eq!(
-            scan(None, Some(at_midnight(2026, 1, 1))),
+            scan(None, Some(date(2026, 1, 1))),
             0,
             "after a later date drops it"
         );
         assert_eq!(
-            scan(Some(at_midnight(2026, 1, 1)), None),
+            scan(Some(date(2026, 1, 1)), None),
             1,
             "before a later date keeps it"
         );
         assert_eq!(
-            scan(Some(at_midnight(2020, 1, 1)), None),
+            scan(Some(date(2020, 1, 1)), None),
             0,
             "before an earlier date drops it"
+        );
+        // The boundary date itself is inclusive: a photo taken during the day is kept
+        // even though its timestamp is later than midnight.
+        assert_eq!(
+            scan(Some(date(2025, 3, 6)), None),
+            1,
+            "before is inclusive of the whole day"
+        );
+        assert_eq!(
+            scan(None, Some(date(2025, 3, 6))),
+            1,
+            "after is inclusive of the whole day"
         );
     }
 
